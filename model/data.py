@@ -4,6 +4,7 @@ import re
 import numpy as np
 import torch
 import torch.nn as nn
+import itertools
 from collections import defaultdict
 
 from tqdm import tqdm
@@ -183,15 +184,15 @@ class CustomDataset(Dataset):
         start_t, end_t = random.choice(annotations)        
         posit_features = self.make_visual_features(video_info, start_t, end_t)
         
+        # select segment of the same length (???) in the video which IoU with posit is less then 1
+        # which means that segments differ at least at one clip
+        possible_segments = [(j,j) for j in range(video_info['num_segments'])]
+        for j in itertools.combinations(range(video_info['num_segments']), 2):
+            possible_segments.append(j)
+        possible_segments = [segment for segment in possible_segments 
+                            if (segment[1] - segment[0]) == (end_t - start_t) and (segment != (start_t, end_t))]
+        start_tn, end_tn = random.choice(possible_segments)    
         # intra sample (wrong segments from the same video)
-        if start_t > video_info['num_segments'] - end_t-1: # take the longest segment
-            start_tn, end_tn = 0, start_t-1
-            while end_tn - start_tn < end_t - start_t:
-                end_tn += 1
-        else: 
-            start_tn, end_tn = end_t+1, video_info['num_segments']-1
-            while end_tn - start_tn < end_t - start_t:
-                start_tn -= 1
         intra_features = self.make_visual_features(video_info, start_tn, end_tn)      
         
         # select random video from dataset
