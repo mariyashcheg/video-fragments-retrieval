@@ -158,7 +158,7 @@ if __name__ == '__main__':
     EXPER_DIRECTORY = args.experiment_dir
     N_EPOCHES = args.n_epoches
 
-    if args.feature_type is in data.FEATURE_DIM.keys():
+    if args.feature_type in data.FEATURE_DIM.keys():
         FEATURE_TYPE = args.feature_type
     else:
         raise ValueError("Unknown feature type '{}'".format(args.feature_type))

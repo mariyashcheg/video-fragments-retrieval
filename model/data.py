@@ -4,6 +4,7 @@ import re
 import numpy as np
 import torch
 import torch.nn as nn
+from collections import defaultdict
 
 from tqdm import tqdm
 from pathlib import Path
@@ -112,86 +113,94 @@ class WordIndexer():
 class CustomDataset(Dataset):
 
     def __init__(self, video_list, word_indexer, ft_directory, ft_type, max_query_len=50):
-        self.video_list = video_list
         self.word_indexer = word_indexer
         self.max_query_len = max_query_len
         self.ft_directory = ft_directory
         self.ft_type = ft_type
-        
-    def make_average_features(self, video):
-        
-        ft_file = 'vgg19_ft_{}.npy'.format(video)
-        video_features = np.load(Path(self.ft_directory).joinpath(ft_file))
-        if video_features.shape[0] % SELECT_FPS == 0:
-            num_segments = video_features.shape[0] // SELECT_FPS
-        else:
-            num_segments = video_features.shape[0] // SELECT_FPS + 1
+        self.indices = defaultdict(list)
+        self.video_list = self.load_features(video_list)
 
-        # segment features = average features for all frames in segment
-        segment_features = np.zeros((num_segments, FEATURE_DIM[self.ft_type]))
-        for i in range(segment_features.shape[0]):
-            segment_features[i, :] = np.mean(video_features[i*FRAMES_PER_SEC:(i+1)*FRAMES_PER_SEC, :], axis=0)
-            
-        # context features = average features for all frames in video
-        context_features = np.mean(video_features, axis=0)
-        
-        return segment_features, context_features
+    def load_features(self, video_list):
+        video_list_corr = []
+
+        for ind in range(len(video_list)):
+            video_info = video_list[ind]
+            ft_file = '{}_ft_{}.npy'.format(self.ft_type, video_info['video'])
+            video_features = np.load(Path(self.ft_directory).joinpath(ft_file))
+            if video_features.shape[0] % SELECT_FPS == 0:
+                num_segments = video_features.shape[0] // SELECT_FPS
+            else:
+                num_segments = video_features.shape[0] // SELECT_FPS + 1
+
+            # segment features = average features for all frames in segment
+            segment_features = np.zeros((num_segments, FEATURE_DIM[self.ft_type]))
+            for i in range(segment_features.shape[0]):
+                segment_features[i, :] = np.mean(video_features[i*FRAMES_PER_SEC:(i+1)*FRAMES_PER_SEC, :], axis=0)
+                
+            # context features = average features for all frames in video
+            context_features = np.mean(video_features, axis=0)
+
+            video_info['segment_features'] = segment_features
+            video_info['context_features'] = context_features
+            video_info['num_segments'] = num_segments
+            self.indices[num_segments].append(ind)
+            video_list_corr.append(video_info)
+
+        return video_list_corr
     
-    
-    def make_visual_features(self, start_t, end_t, segment_features, context_features):
+    def make_visual_features(self, video_info, start_t, end_t):
         
-        num_segments = context_features.shape[0]
-        segment_ft = torch.from_numpy(segment_features[start_t:end_t+1]).float()
-        context_ft = torch.from_numpy(context_features.reshape(1, -1)).float()
+        num_segments = video_info['num_segments']
+        segment_ft = torch.from_numpy(video_info['segment_features'][start_t:end_t+1]).float()
+        context_ft = torch.from_numpy(video_info['context_features'].reshape(1, -1)).float()
         temporal_endpoints = torch.cat(
             [torch.arange(start_t, end_t+1).view(-1,1),
              torch.arange(start_t+1, end_t+2).view(-1,1)], axis=1) / num_segments
         
         features = torch.cat(
             [segment_ft, context_ft.repeat(segment_ft.size(0), 1), temporal_endpoints], axis=1)
-        return features
+        return features    
     
-    
-    def get_annotations(self, video_info, num_segments):
+    def get_annotations(self, video_info):
         annotations = np.array(video_info['times'])
-        annotations = annotations[annotations[:, 1] <= num_segments]
+        annotations = annotations[annotations[:, 1] <= video_info['num_segments']]
         return annotations
-    
+
+    def get_possible_video_indices(self, num_segments):
+        possible_indices = []
+        for num in self.indices.keys():
+            if num_segments <= num:
+                possible_indices.extend(self.indices[num])
+        return possible_indices
         
     def __getitem__(self, index):
         
         ######### VIDEO FEATURES #########
         video_info = self.video_list[index]
-        segment_features, context_features = self.make_average_features(video_info['video'])
-                
-        num_segments = segment_features.shape[0]
-        annotations = self.get_annotations(video_info, num_segments)
+        annotations = self.get_annotations(video_info)
         
         # positive sample
         start_t, end_t = random.choice(annotations)        
-        posit_features = self.make_visual_features(start_t, end_t, segment_features, context_features)
+        posit_features = self.make_visual_features(video_info, start_t, end_t)
         
         # intra sample (wrong segments from the same video)
-        if start_t > num_segments - end_t-1: # take the longest segment
+        if start_t > video_info['num_segments'] - end_t-1: # take the longest segment
             start_tn, end_tn = 0, start_t-1
-        elif start_t < num_segments - end_t-1:
-            start_tn, end_tn = end_t+1, num_segments-1
-        else: # random if both segments of same length
-            start_tn, end_tn = random.choice([(0, start_t-1),(end_t+1, num_segments-1)])
-        intra_features = self.make_visual_features(start_tn, end_tn, segment_features, context_features)      
+            while end_tn - start_tn < end_t - start_t:
+                end_tn += 1
+        else: 
+            start_tn, end_tn = end_t+1, video_info['num_segments']-1
+            while end_tn - start_tn < end_t - start_t:
+                start_tn -= 1
+        intra_features = self.make_visual_features(video_info, start_tn, end_tn)      
         
         # select random video from dataset
-        possible_indices = [i for i in range(len(self.video_list)) if i != index]
+        possible_indices = self.get_possible_video_indices(video_info['num_segments'])
+        possible_indices.remove(index)
         other_index = random.choice(possible_indices)
         other_video_info = self.video_list[other_index]
-        other_segment_features, other_context_features = self.make_average_features(other_video_info['video'])
-        
-        other_num_segments = other_segment_features.shape[0]
-        other_annotations = self.get_annotations(other_video_info, other_num_segments)
-        
-        # inter sample (segments from other video)
-        start_t, end_t = random.choice(other_annotations)        
-        inter_features = self.make_visual_features(start_t, end_t, other_segment_features, other_context_features)        
+        # inter sample (segments from other video)        
+        inter_features = self.make_visual_features(other_video_info, start_t, end_t)        
         
         ######### LANGUAGE FEATURES #########
         query = video_info['description'].rstrip('\n ').lower()
