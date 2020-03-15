@@ -29,7 +29,6 @@ def start_new_experiment(exper_dir):
         for d in Path(exper_dir).iterdir():
             n = re.fullmatch(r'\d+', d.name)
             if d.is_dir() and n is not None:
-    parser.add_argument("--feature_type", type=str, default=None)
                 experiments.append(int(n.group()))
         experiments = sorted(experiments)        
         new_experiment = str(experiments[-1]+1)
