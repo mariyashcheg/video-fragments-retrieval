@@ -39,6 +39,20 @@ def start_new_experiment(exper_dir):
     Path(new_exper_dir).mkdir(exist_ok=False)
     return new_exper_dir
 
+def load_dataset_info(dataset_type, missed_videos):
+    annotations = {}
+    videos = []
+    for video in read_json(Path(DATASET_DIRECTORY).joinpath('{}_data.json'.format(dataset_type))):
+        if video['video'] not in missed_videos:
+            annotations[video['annotation_id']] = dict(
+                video=video['video'],
+                description=video['description'],
+                times=video['times']
+            )
+            videos.append(video['video'])
+            
+    return annotations, list(set(videos))
+
 
 class Trainer:
 
@@ -62,16 +76,17 @@ class Trainer:
         model.train()
         for batch in tqdm(iterator):
             
-            posit_ft = batch['posit'][0].to(self.device)
-            intra_ft = batch['intra'][0].to(self.device)
-            inter_ft = batch['inter'][0].to(self.device)
-            lang_ft = batch['lang'][0].to(self.device)
+            posit_ft = batch['posit'].to(self.device)
+            intra_ft = batch['intra'].to(self.device)
+            inter_ft = batch['inter'].to(self.device)
+            lang_ft = batch['lang'].to(self.device)
+            mask = batch['mask'].to(self.device)
 
             optimizer.zero_grad()
             posit_emb, intra_emb, inter_emb, lang_emb = model(
                 posit_ft, intra_ft, inter_ft, lang_ft, self.device)
             
-            loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb)        
+            loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)        
             loss.backward()
             optimizer.step()
 
@@ -94,16 +109,17 @@ class Trainer:
         epoch_loss = 0        
         for batch in tqdm(iterator):
 
-            posit_ft = batch['posit'][0].to(self.device)
-            intra_ft = batch['intra'][0].to(self.device)
-            inter_ft = batch['inter'][0].to(self.device)
-            lang_ft = batch['lang'][0].to(self.device)
+            posit_ft = batch['posit'].to(self.device)
+            intra_ft = batch['intra'].to(self.device)
+            inter_ft = batch['inter'].to(self.device)
+            lang_ft = batch['lang'].to(self.device)
+            mask = batch['mask'].to(self.device)
 
             with torch.no_grad():
                 posit_emb, intra_emb, inter_emb, lang_emb = model(
                     posit_ft, intra_ft, inter_ft, lang_ft, self.device)
                 
-                loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb)
+                loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)
                 epoch_loss += loss.item()
         
         log_entry = dict(
@@ -116,13 +132,17 @@ class Trainer:
         
         return log_entry['loss']
 
-    def ranking_loss(self, posit_emb, intra_emb, inter_emb, lang_emb):
+    def ranking_loss(self, posit_emb, intra_emb, inter_emb, lang_emb, mask):
 
-        c_posit = F.pairwise_distance(posit_emb, lang_emb.repeat(posit_emb.size(0), 1)).mean()
-        c_intra = F.pairwise_distance(intra_emb, lang_emb.repeat(intra_emb.size(0), 1)).mean()
-        c_inter = F.pairwise_distance(inter_emb, lang_emb.repeat(inter_emb.size(0), 1)).mean()
-
-        return F.relu(c_posit - c_inter + self.b) + self.lamb*F.relu(c_posit - c_intra + self.b)
+        loss = 0
+        n_samples = mask.max().item()+1
+        for i in range(n_samples):
+            mask_i = mask == i
+            c_posit = F.pairwise_distance(posit_emb[mask_i], lang_emb[i].repeat(posit_emb[mask_i].size(0), 1)).mean()
+            c_intra = F.pairwise_distance(intra_emb[mask_i], lang_emb[i].repeat(intra_emb[mask_i].size(0), 1)).mean()
+            c_inter = F.pairwise_distance(inter_emb[mask_i], lang_emb[i].repeat(inter_emb[mask_i].size(0), 1)).mean()
+            loss += (F.relu(c_posit - c_inter + self.b) + self.lamb*F.relu(c_posit - c_intra + self.b))
+        return loss
 
     @staticmethod
     def grad_norm(model):
@@ -148,6 +168,7 @@ if __name__ == '__main__':
     parser.add_argument("--dataset_dir", type=str, default='dataset/')
     parser.add_argument("--experiment_dir", type=str, default='experiment/')
     parser.add_argument("--n_epoches", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--feature_type", type=str, default=None)
     args = parser.parse_args()
@@ -157,6 +178,7 @@ if __name__ == '__main__':
     DATASET_DIRECTORY = args.dataset_dir
     EXPER_DIRECTORY = args.experiment_dir
     N_EPOCHES = args.n_epoches
+    BATCH_SIZE = args.batch_size
 
     if args.feature_type in data.FEATURE_DIM.keys():
         FEATURE_TYPE = args.feature_type
@@ -179,21 +201,21 @@ if __name__ == '__main__':
     else:
         missed_videos = []
 
-    train_data = [video for video in read_json(Path(DATASET_DIRECTORY).joinpath('train_data.json'))
-        if video['video'] not in missed_videos]
-    test_data = [video for video in read_json(Path(DATASET_DIRECTORY).joinpath('test_data.json'))
-        if video['video'] not in missed_videos]
-    val_data = [video for video in read_json(Path(DATASET_DIRECTORY).joinpath('val_data.json'))
-        if video['video'] not in missed_videos]
+    train_annotations, train_videos = load_dataset_info('train', missed_videos)
+    test_annotations, test_videos = load_dataset_info('test', missed_videos)
+    val_annotations, val_videos = load_dataset_info('val', missed_videos)
 
     word_indexer = data.WordIndexer(EMB_DIRECTORY)
-    train_dataset = data.CustomDataset(train_data, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
-    test_dataset = data.CustomDataset(test_data, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
-    # val_dataset = data.CustomDataset(val_data, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
+    train_dataset = data.CustomDataset(train_videos, train_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
+    test_dataset = data.CustomDataset(test_videos, test_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
+    # val_dataset = data.CustomDataset(val_videos, val_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
 
-    train_iter = DataLoader(train_dataset, batch_size=1, shuffle=True)
-    test_iter = DataLoader(test_dataset, batch_size=1, shuffle=True)
-    # val_iter = DataLoader(val_dataset, batch_size=1, shuffle=True)
+    train_iter = DataLoader(train_dataset, shuffle=False, collate_fn=data.custom_collate, 
+        batch_sampler=data.CustomBatchSampler(BATCH_SIZE, train_annotations, train_dataset.num_segments_info))    
+    test_iter = DataLoader(test_dataset, shuffle=False, collate_fn=data.custom_collate, 
+        batch_sampler=data.CustomBatchSampler(BATCH_SIZE, test_annotations, test_dataset.num_segments_info, shuffle=False))
+    # val_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.custom_collate, 
+    #     batch_sampler=data.CustomBatchSampler(BATCH_SIZE, val_annotations, val_dataset.num_segments_info, shuffle=False))
 
     new_experiment = start_new_experiment(EXPER_DIRECTORY)
     trainer = Trainer(

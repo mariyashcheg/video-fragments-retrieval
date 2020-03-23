@@ -42,7 +42,7 @@ class CALModel(nn.Module):
         inter_emb = self.visual_fc(inter_features)
         
         embedded = self.word_embedding(lang_features)
-        _, hidden = self.lstm(embedded, self.init_hidden(1, device))
+        _, hidden = self.lstm(embedded, self.init_hidden(lang_features.size(0), device))
         lang_emb = self.lang_fc(hidden[0].view(-1, 2*self.hidden_size))
         
         return posit_emb, intra_emb, inter_emb, lang_emb
