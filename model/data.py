@@ -114,12 +114,13 @@ class WordIndexer():
 
 class CustomDataset(Dataset):
 
-    def __init__(self, videos, annotations, word_indexer, ft_directory, ft_type, max_query_len=50):
+    def __init__(self, videos, annotations, word_indexer, ft_directory, ft_type, validate=False, max_query_len=50):
         self.word_indexer = word_indexer
         self.max_query_len = max_query_len
         self.ft_directory = ft_directory
         self.ft_type = ft_type
         self.num_segments_info = {}
+        self.validate = validate
         # unique video
         self.video_features = {}
         self.load_video_features(videos)
@@ -129,8 +130,9 @@ class CustomDataset(Dataset):
 
     def load_video_features(self, videos):
         for video in tqdm(videos):
-            ft_file = '{}_ft_{}.npy'.format(self.ft_type, video)
+            ft_file = f'features_{self.ft_type}/{self.ft_type}_ft_{video}.npy'
             video_features = np.load(Path(self.ft_directory).joinpath(ft_file))
+            video_features = video_features.reshape((video_features.shape[0], FEATURE_DIM[self.ft_type]))
             if video_features.shape[0] % SELECT_FPS == 0:
                 num_segments = video_features.shape[0] // SELECT_FPS
             else:
@@ -170,30 +172,36 @@ class CustomDataset(Dataset):
         return features    
         
     def __getitem__(self, sample):
-        # positive 
-        posit_features = self.make_visual_features(sample['video_pos'], sample['start_t'], sample['end_t'])
-        # intra-negative
-        intra_features = self.make_visual_features(sample['video_pos'], sample['start_tn'], sample['end_tn'])      
-        # inter-negative        
-        inter_features = self.make_visual_features(sample['video_neg'], sample['start_t'], sample['end_t'])        
-        
         # lang features
         lang_features = self.lang_features[sample['annotation_id']]
+        # positive 
+        posit_features = self.make_visual_features(sample['video_pos'], sample['start_t'], sample['end_t'])
         
-        return dict(
-            posit=posit_features,
-            intra=intra_features, 
-            inter=inter_features, 
-            lang=lang_features)
-
+        if self.validate:
+            return dict(
+                posit=posit_features,
+                lang=lang_features,
+                iou=sample['iou']
+            )
+        else:
+            # intra-negative
+            intra_features = self.make_visual_features(sample['video_pos'], sample['start_tn'], sample['end_tn'])      
+            # inter-negative        
+            inter_features = self.make_visual_features(sample['video_neg'], sample['start_t'], sample['end_t'])        
+            return dict(
+                posit=posit_features,
+                intra=intra_features, 
+                inter=inter_features, 
+                lang=lang_features
+            )
 
 class CustomBatchSampler(BatchSampler):
 
-    def __init__(self, batch_size, annotations, num_segments_info, shuffle=True, drop_last=False):
+    def __init__(self, batch_size, annotations, num_segments_info, train=True, drop_last=False):
         self.batch_size = batch_size
         self.annotations = annotations
         self.num_segments_info = num_segments_info
-        self.shuffle = shuffle
+        self.train = train
         self.drop_last = drop_last
         self.indices = defaultdict(list)
         for video, num_segments in self.num_segments_info.items():
@@ -214,7 +222,7 @@ class CustomBatchSampler(BatchSampler):
         
     def __iter__(self):
         annotation_ids = list(self.annotations.keys())
-        if self.shuffle:
+        if self.train:
             random.shuffle(annotation_ids)
         batch = []
         curr_batch_size = 0
@@ -223,7 +231,10 @@ class CustomBatchSampler(BatchSampler):
             annot_info = self.annotations[annot_id]
             num_segments = self.num_segments_info[annot_info['video']]
             # positive sample
-            start_t, end_t = random.choice(self.get_annotations(annot_id)) 
+            if self.train:
+                start_t, end_t = random.choice(self.get_annotations(annot_id)) 
+            else:
+                start_t, end_t = self.get_annotations(annot_id)[0]
             
             # intra-negative sample (wrong segments from the same video):
             #    select segment of the same length (???) in the video which IoU with posit is less then 1
@@ -233,7 +244,7 @@ class CustomBatchSampler(BatchSampler):
                 possible_segments.append(j)
             possible_segments = [segment for segment in possible_segments 
                         if (segment[1] - segment[0]) == (end_t - start_t) and (segment != (start_t, end_t))]
-            if self.shuffle:
+            if self.train:
                 start_tn, end_tn = random.choice(possible_segments)    
             else:
                 start_tn, end_tn = possible_segments[0]
@@ -242,7 +253,7 @@ class CustomBatchSampler(BatchSampler):
             #    select the same segment (start_t, end_t) from random video in dataset
             possible_neg_videos = self.get_possible_videos(end_t+1)
             possible_neg_videos.remove(annot_info['video'])
-            if self.shuffle:
+            if self.train:
                 video_neg = random.choice(possible_neg_videos)
             else:
                 video_neg = possible_neg_videos[0]
@@ -266,11 +277,11 @@ class CustomBatchSampler(BatchSampler):
         if len(batch) > 0 and not self.drop_last:
             yield batch
             
-    def __len__(self):
-        if self.drop_last:
-            return len(self.annotations) // self.batch_size
-        else:
-            return (len(self.annotations) + self.batch_size - 1) // self.batch_size
+    # def __len__(self):
+    #     if self.drop_last:
+    #         return len(self.annotations) // self.batch_size
+    #     else:
+    #         return (len(self.annotations) + self.batch_size - 1) // self.batch_size
 
 
 def custom_collate(batch):
@@ -287,5 +298,66 @@ def custom_collate(batch):
         intra=torch.cat(intra, axis=0), 
         inter=torch.cat(inter, axis=0), 
         lang=torch.cat(lang, axis=0),
+        mask=torch.LongTensor(mask)
+    )
+
+
+class ValidateBatchSampler(BatchSampler):
+
+    def __init__(self, annotations, num_segments_info, iou_threshold):
+        self.annotations = annotations
+        self.num_segments_info = num_segments_info
+        self.iou_threshold = iou_threshold
+        
+    def get_annotations(self, annot_id):
+        annot_info = self.annotations[annot_id]
+        annotations = np.array(annot_info['times'])
+        annotations = annotations[annotations[:, 1] <= self.num_segments_info[annot_info['video']]]
+        return annotations
+    
+    def get_iou(self, annot_id, start_t, end_t):
+        times = np.array(self.annotations[annot_id]['times'])
+        intersection = np.maximum(np.minimum(times[:, 1], end_t) + 1 - np.maximum(times[:, 0], start_t), 0)
+        union = np.maximum(times[:, 1], end_t) + 1 - np.minimum(times[:, 0], start_t)
+        return int(((intersection / union) > self.iou_threshold).sum() >= 2)
+    
+    def __iter__(self):
+        batch = []
+        for annot_id in list(self.annotations.keys()):
+            annot_info = self.annotations[annot_id]
+            num_segments = self.num_segments_info[annot_info['video']]
+            
+            moments = [(j,j) for j in range(num_segments)]
+            for j in itertools.combinations(range(num_segments), 2):
+                moments.append(j)
+            
+            for start_t, end_t in moments:
+                batch.append(
+                    dict(
+                        annotation_id=annot_id,
+                        video_pos=annot_info['video'],
+                        start_t=start_t,
+                        end_t=end_t,
+                        iou=self.get_iou(annot_id, start_t, end_t)
+                    )
+                )
+            yield batch
+            batch = []
+            
+    def __len__(self):
+        return len(self.annotations) // self.batch_size
+
+
+def validate_collate(batch):
+    mask = []
+    posit, iou = [], []
+    for i, sample in enumerate(batch):
+        posit.append(sample['posit'])
+        iou.append(sample['iou'])
+        mask.extend([i]*sample['posit'].size(0))
+    return dict(
+        posit=torch.cat(posit, axis=0),
+        lang=sample['lang'],
+        iou=iou,
         mask=torch.LongTensor(mask)
     )

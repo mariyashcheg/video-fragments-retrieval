@@ -35,14 +35,12 @@ class CALModel(nn.Module):
         return [torch.zeros(2, batch_size, self.hidden_size, device=device),
                 torch.zeros(2, batch_size, self.hidden_size, device=device)]
 
-    def forward(self, posit_features, intra_features, inter_features, lang_features, device):
-        
-        posit_emb = self.visual_fc(posit_features)
-        intra_emb = self.visual_fc(intra_features)
-        inter_emb = self.visual_fc(inter_features)
-        
-        embedded = self.word_embedding(lang_features)
-        _, hidden = self.lstm(embedded, self.init_hidden(lang_features.size(0), device))
-        lang_emb = self.lang_fc(hidden[0].view(-1, 2*self.hidden_size))
-        
-        return posit_emb, intra_emb, inter_emb, lang_emb
+    def forward(self, batch, visual=True, device=None):
+        if visual:
+            output = self.visual_fc(batch)
+        else:
+            embedded = self.word_embedding(batch)
+            _, hidden = self.lstm(embedded, self.init_hidden(batch.size(0), device))
+            output = self.lang_fc(hidden[0].view(-1, 2*self.hidden_size))
+
+        return output
