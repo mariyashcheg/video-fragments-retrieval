@@ -32,6 +32,7 @@ class Trainer:
         
         model = model.to(self.device)
         model.train()
+        epoch_loss, count_loss = 0, 0
         for batch in tqdm(iterator):
             
             posit_ft = batch['posit'].to(self.device)
@@ -47,6 +48,8 @@ class Trainer:
             lang_emb = model(lang_ft, False, self.device)
             
             loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)        
+            epoch_loss += loss.item()
+            count_loss += 1
             loss.backward()
             optimizer.step()
 
@@ -61,6 +64,8 @@ class Trainer:
                     name = log_prefix + '/' + name
                 self.train_writer.add_scalar(name, value, global_step=self.global_step)
             self.global_step += 1
+        
+        return epoch_loss / count_loss
 
     def test_epoch(self, model, iterator, log_prefix=""):
         
@@ -157,7 +162,7 @@ if __name__ == '__main__':
             DEVICE = torch.device('cuda')
         else:
             DEVICE = torch.device('cpu')
-    print(DEVICE)
+    print(DEVICE, FEATURE_TYPE)
 
     train_annotations, train_videos = utils.load_dataset_info('train', DATASET_DIRECTORY, MISSED_VIDEOS)
     test_annotations, test_videos = utils.load_dataset_info('test', DATASET_DIRECTORY, MISSED_VIDEOS)
@@ -195,7 +200,7 @@ if __name__ == '__main__':
     
     for epoch in range(N_EPOCHES):
 
-        trainer.train_epoch(model, train_iter, optimizer)
+        train_loss = trainer.train_epoch(model, train_iter, optimizer)
         test_loss = trainer.test_epoch(model, test_iter)
         scheduler.step()
 
@@ -208,4 +213,4 @@ if __name__ == '__main__':
             global_step=trainer.global_step,
         )
         torch.save(state, new_experiment.joinpath('last.pth'))
-        print(f'Epoch: {epoch+1:02},\tVal. Loss: {test_loss:.4f}')
+        print(f'Epoch: {epoch+1:02},\tTrain Loss: {train_loss:.4f},\tTest Loss: {test_loss:.4f}')

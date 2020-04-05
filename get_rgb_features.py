@@ -126,7 +126,7 @@ if __name__ == '__main__':
         model.classifier = nn.Sequential(*[model.classifier[i] for i in range(5)])
     elif MODEL_TYPE == 'resnet152':
         # load pretrained ResNet152
-        model = torchvision.models.resnet152(pretrained=True)
+        model = torchvision.models.resnet152(pretrained=True).to(DEVICE)
         # need features after avgpool layer (before final FC-head)
         model = nn.Sequential(*(list(model.children())[:-1]))
 

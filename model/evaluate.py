@@ -48,6 +48,15 @@ def evaluate(model, iterator, device):
             else:
                 recalls[k].append(int(correct[:k].sum() > 0))
 
+        if (li % 500 == 0) and (li != 0):
+            metrics = {}
+            for name, value in recalls.items():
+                if name == 'MR':
+                    metrics[name] = np.median(value)
+                else:
+                    metrics[f'R@{name}'] = np.mean(value)
+            print(''.join([f'{name}: {value:.4f}\t' for name, value in metrics.items()]))
+
     metrics = {}
     for name, value in recalls.items():
         if name == 'MR':

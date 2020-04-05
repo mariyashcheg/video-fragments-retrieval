@@ -41,6 +41,6 @@ class CALModel(nn.Module):
         else:
             embedded = self.word_embedding(batch)
             _, hidden = self.lstm(embedded, self.init_hidden(batch.size(0), device))
-            output = self.lang_fc(hidden[0].view(-1, 2*self.hidden_size))
+            output = self.lang_fc(hidden[0].transpose(0,1).reshape(batch.size(0), 2*self.hidden_size))
 
         return output
