@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
 
     videos = {}
+    # compute embeddings for all clips in each unique video in dataset
     for batch in tqdm(video_iterator):
         with torch.no_grad():
             videos[batch['video']] = model(batch['feature'].to(device))
@@ -25,6 +26,7 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
     recalls = {1: [], 10: [], 100: [], 'MR':[]}
     moments = lang_iterator.batch_sampler.moments
     print('\nEvaluation:')
+    # compute embeddings for all queries in dataset
     for li, batch in tqdm(enumerate(lang_iterator)):
         with torch.no_grad():
             lang_emb = model(batch['feature'].to(device), False, device)
@@ -32,19 +34,28 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
         distances, correct = [],[]
         for video in videos.keys():
             video_emb = videos[video]
+            # for each query compute distance between query and clip embeddings
             dist = F.pairwise_distance(video_emb, lang_emb.repeat(video_emb.size(0), 1))
+            # for each possible moment in video compute distance between moment and query
+            # as sum of distances between clips in the moment and query (precomputed on prev step)
+            # (15 possible moments for video of 5 clips, 21 - for 6 clips)
             distances.extend([dist.index_select(0, torch.arange(start_t, end_t+1).to(device)).mean().item() 
                                 for start_t, end_t in moments[video_emb.size(0)]])
+            # ground truth: 1 if IoU between moment and at least 2 manual annotations is greater the threshold
+            # for incorrect videos all IoU score are 0
             if video == batch['video']:
                 correct.extend(batch['iou'])
             else:
-                correct.extend([0]*len(moments[video_emb.size(0)])) #[0]*(mask.max().item()+1))
+                correct.extend([0]*len(moments[video_emb.size(0)]))
 
+        # sort all moments from all videos by distances
         correct = np.array(correct, dtype=int)[np.argsort(distances)]
         for k in recalls.keys():
             if k == 'MR':
+                # median rank: index position of first correct moment
                 recalls[k].append(np.where(correct == 1)[0][0])
             else:
+                # Recall@K: 1 if correct moment is among in top-K moments, 0 otherwise
                 recalls[k].append(int(correct[:k].sum() > 0))
 
         if (li % preliminary == 0) and (li != 0):
@@ -56,7 +67,7 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
                     metrics[f'R@{name}'] = np.mean(value)
             print(''.join([f'{name}: {value:.4f}\t' for name, value in metrics.items()]))
 
-    metrics = {}
+    metrics = {} # average metrics for all queries
     for name, value in recalls.items():
         if name == 'MR':
             metrics[name] = np.median(value)
