@@ -15,32 +15,31 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 
 
-def evaluate(model, iterator, device):
+def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
 
-    videos, queries, masks, ious = [], [], [], []
-    for batch in tqdm(iterator):
-        video_ft = batch['posit'].to(device)
-        lang_ft = batch['lang'].to(device)
-        masks.append(batch['mask'].to(device))
-        ious.append(batch['iou'])
-
+    videos = {}
+    for batch in tqdm(video_iterator):
         with torch.no_grad():
-            videos.append(model(video_ft))
-            queries.append(model(lang_ft, False, device))
+            videos[batch['video']] = model(batch['feature'].to(device))
 
     recalls = {1: [], 10: [], 100: [], 'MR':[]}
-    for li, lang_emb in tqdm(enumerate(queries)):
-        distances = []
-        correct = []
-        for vi, video_emb in enumerate(videos):
-            mask = masks[vi]
-            for i in range(mask.max().item()+1):
-                mask_i = mask == i
-                distances.append(F.pairwise_distance(video_emb[mask_i], lang_emb.repeat(video_emb[mask_i].size(0), 1)).mean().item())
-            if vi == li:
-                correct.extend(ious[vi])
+    moments = lang_iterator.batch_sampler.moments
+    print('\nEvaluation:')
+    for li, batch in tqdm(enumerate(lang_iterator)):
+        with torch.no_grad():
+            lang_emb = model(batch['feature'].to(device), False, device)
+
+        distances, correct = [],[]
+        for video in videos.keys():
+            video_emb = videos[video]
+            dist = F.pairwise_distance(video_emb, lang_emb.repeat(video_emb.size(0), 1))
+            distances.extend([dist.index_select(0, torch.arange(start_t, end_t+1).to(device)).mean().item() 
+                                for start_t, end_t in moments[video_emb.size(0)]])
+            if video == batch['video']:
+                correct.extend(batch['iou'])
             else:
-                correct.extend([0]*(mask.max().item()+1))
+                correct.extend([0]*len(moments[video_emb.size(0)])) #[0]*(mask.max().item()+1))
+
         correct = np.array(correct, dtype=int)[np.argsort(distances)]
         for k in recalls.keys():
             if k == 'MR':
@@ -48,7 +47,7 @@ def evaluate(model, iterator, device):
             else:
                 recalls[k].append(int(correct[:k].sum() > 0))
 
-        if (li % 500 == 0) and (li != 0):
+        if (li % preliminary == 0) and (li != 0):
             metrics = {}
             for name, value in recalls.items():
                 if name == 'MR':
@@ -80,12 +79,15 @@ if __name__ == '__main__':
     parser.add_argument("--experiment_dir", type=str, default='experiment/')
     parser.add_argument("--missed_videos", type=str, default='../')
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--validation", type=str, default='val')
+    parser.add_argument("--preliminary_print", type=int, default=100)
     args = parser.parse_args()
 
     FT_DIRECTORY = args.features_dir
     EMB_DIRECTORY = args.embedding_dir
     DATASET_DIRECTORY = args.dataset_dir
     EXPER_DIRECTORY = args.experiment_dir
+    DATASET_TYPE = args.validation
     
     if args.device in ['cpu','cuda']:
         DEVICE = args.device
@@ -94,7 +96,6 @@ if __name__ == '__main__':
             DEVICE = torch.device('cuda')
         else:
             DEVICE = torch.device('cpu')
-    print(DEVICE)
 
     print('Loading word embeddings:')
     word_indexer = data.WordIndexer(EMB_DIRECTORY)
@@ -102,13 +103,16 @@ if __name__ == '__main__':
     # load state dict
     state = torch.load(Path(EXPER_DIRECTORY).joinpath('last.pth'))
     FEATURE_TYPE = state['ft_type']
-    
-    print('Loading validation dataset:')
-    val_annotations, val_videos = utils.load_dataset_info('val', DATASET_DIRECTORY, args.missed_videos)
-    val_dataset = data.CustomDataset(val_videos, val_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, validate=True)
-    val_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
-        batch_sampler=data.ValidateBatchSampler(val_annotations, val_dataset.num_segments_info, iou_threshold=0.5))
+    print(DEVICE, FEATURE_TYPE, DATASET_TYPE)
 
+    print('Loading validation dataset:')
+    val_annotations, val_videos = utils.load_dataset_info(DATASET_TYPE, DATASET_DIRECTORY, args.missed_videos)
+    val_dataset = data.CustomDataset(val_videos, val_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, validate=True)
+    val_video_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
+        batch_sampler=data.VideoBatchSampler(val_videos, val_dataset.num_segments_info))
+    val_lang_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
+        batch_sampler=data.LanguageBatchSampler(val_annotations, val_dataset.num_segments_info, 0.5))
+    
     model = models.CALModel(
         pretrained_emb=word_indexer.get_embeddings(),
         visual_input_dim=data.FEATURE_DIM[FEATURE_TYPE]*2+2,
@@ -118,6 +122,6 @@ if __name__ == '__main__':
     model = model.to(DEVICE)    
     
     # evaluate model with exhaustive search
-    metrics = evaluate(model, val_iter, DEVICE)
+    metrics = evaluate(model, val_video_iter, val_lang_iter, DEVICE, args.preliminary_print)
     print(''.join([f'{name}: {value:.4f}\t' for name, value in metrics.items()]))
 

@@ -141,10 +141,12 @@ class CustomDataset(Dataset):
             # segment features = average features for all frames in segment
             segment_features = np.zeros((num_segments, FEATURE_DIM[self.ft_type]))
             for i in range(segment_features.shape[0]):
-                segment_features[i, :] = np.mean(video_features[i*FRAMES_PER_SEC:(i+1)*FRAMES_PER_SEC, :], axis=0)
+                features = np.mean(video_features[i*FRAMES_PER_SEC:(i+1)*FRAMES_PER_SEC, :], axis=0)
+                segment_features[i, :] = features / (np.linalg.norm(features) + 1e-5)
                 
             # context features = average features for all frames in video
-            context_features = np.mean(video_features, axis=0)
+            features = np.mean(video_features, axis=0)
+            context_features = features / (np.linalg.norm(features) + 1e-5)
             
             self.video_features[video] = dict(
                 segment_features=segment_features,
@@ -172,18 +174,27 @@ class CustomDataset(Dataset):
         return features    
         
     def __getitem__(self, sample):
-        # lang features
-        lang_features = self.lang_features[sample['annotation_id']]
-        # positive 
-        posit_features = self.make_visual_features(sample['video_pos'], sample['start_t'], sample['end_t'])
-        
         if self.validate:
-            return dict(
-                posit=posit_features,
-                lang=lang_features,
-                iou=sample['iou']
-            )
+            if 'iou' in sample.keys():
+                # language
+                lang_features = self.lang_features[sample['annotation_id']]
+                return dict(
+                    features=lang_features,
+                    video=sample['video_pos'],
+                    iou=sample['iou']
+                )
+            else:
+                # video 
+                posit_features = self.make_visual_features(sample['video_pos'], sample['start_t'], sample['end_t'])
+                return dict(
+                    features=posit_features,
+                    video=sample['video_pos']
+                )
         else:
+            # lang features
+            lang_features = self.lang_features[sample['annotation_id']]
+            # positive 
+            posit_features = self.make_visual_features(sample['video_pos'], sample['start_t'], sample['end_t'])
             # intra-negative
             intra_features = self.make_visual_features(sample['video_pos'], sample['start_tn'], sample['end_tn'])      
             # inter-negative        
@@ -194,6 +205,7 @@ class CustomDataset(Dataset):
                 inter=inter_features, 
                 lang=lang_features
             )
+
 
 class CustomBatchSampler(BatchSampler):
 
@@ -302,13 +314,42 @@ def custom_collate(batch):
     )
 
 
-class ValidateBatchSampler(BatchSampler):
+class VideoBatchSampler(BatchSampler):
+
+    def __init__(self, videos, num_segments_info):
+        self.videos = videos
+        self.num_segments_info = num_segments_info
+                
+    def __iter__(self):
+        batch = []
+        for video in self.videos:
+            batch.append(
+                dict(
+                    video_pos=video,
+                    start_t=0,
+                    end_t=self.num_segments_info[video] - 1,
+                )
+            )
+            yield batch
+            batch = []
+            
+    def __len__(self):
+        return len(self.videos)    
+
+class LanguageBatchSampler(BatchSampler):
 
     def __init__(self, annotations, num_segments_info, iou_threshold):
         self.annotations = annotations
         self.num_segments_info = num_segments_info
         self.iou_threshold = iou_threshold
+        self.moments = {num_seg: self.generate_moments(num_seg) for num_seg in range(7)}
         
+    def generate_moments(self, num_segments):
+        moments = [(j,j) for j in range(num_segments)]
+        for j in itertools.combinations(range(num_segments), 2):
+            moments.append(j)
+        return moments
+
     def get_annotations(self, annot_id):
         annot_info = self.annotations[annot_id]
         annotations = np.array(annot_info['times'])
@@ -327,37 +368,24 @@ class ValidateBatchSampler(BatchSampler):
             annot_info = self.annotations[annot_id]
             num_segments = self.num_segments_info[annot_info['video']]
             
-            moments = [(j,j) for j in range(num_segments)]
-            for j in itertools.combinations(range(num_segments), 2):
-                moments.append(j)
-            
-            for start_t, end_t in moments:
-                batch.append(
-                    dict(
-                        annotation_id=annot_id,
-                        video_pos=annot_info['video'],
-                        start_t=start_t,
-                        end_t=end_t,
-                        iou=self.get_iou(annot_id, start_t, end_t)
-                    )
+            batch.append(
+                dict(
+                    annotation_id=annot_id,
+                    video_pos=annot_info['video'],
+                    iou=[self.get_iou(annot_id, start_t, end_t) for start_t, end_t in self.moments[num_segments]]
                 )
+            )
             yield batch
             batch = []
             
     def __len__(self):
-        return len(self.annotations) // self.batch_size
+        return len(self.annotations)
 
 
 def validate_collate(batch):
-    mask = []
-    posit, iou = [], []
-    for i, sample in enumerate(batch):
-        posit.append(sample['posit'])
-        iou.append(sample['iou'])
-        mask.extend([i]*sample['posit'].size(0))
+    iou = batch[0]['iou'] if 'iou' in batch[0].keys() else []
     return dict(
-        posit=torch.cat(posit, axis=0),
-        lang=sample['lang'],
-        iou=iou,
-        mask=torch.LongTensor(mask)
+        feature=batch[0]['features'],
+        video=batch[0]['video'],
+        iou=iou
     )
