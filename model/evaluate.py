@@ -14,6 +14,14 @@ from tqdm import tqdm
 from pathlib import Path
 from torch.utils.data import DataLoader
 
+def get_metrics(recalls):
+    metrics = {}
+    for name, value in recalls.items():
+        if name == 'MR':
+            metrics[name] = np.median(value)
+        else:
+            metrics[f'R@{name}'] = np.mean(value)*100
+    return metrics
 
 def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
 
@@ -24,6 +32,7 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
             videos[batch['video']] = model(batch['feature'].to(device))
 
     recalls = {1: [], 10: [], 100: [], 'MR':[]}
+    recalls_chance = {1: [], 10: [], 100: [], 'MR':[]}
     moments = lang_iterator.batch_sampler.moments
     print('\nEvaluation:')
     # compute embeddings for all queries in dataset
@@ -31,7 +40,7 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
         with torch.no_grad():
             lang_emb = model(batch['feature'].to(device), False, device)
 
-        distances, correct = [],[]
+        distances, ground_truth = [],[]
         for video in videos.keys():
             video_emb = videos[video]
             # for each query compute distance between query and clip embeddings
@@ -44,37 +53,30 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100):
             # ground truth: 1 if IoU between moment and at least 2 manual annotations is greater the threshold
             # for incorrect videos all IoU score are 0
             if video == batch['video']:
-                correct.extend(batch['iou'])
+                ground_truth.extend(batch['iou'])
             else:
-                correct.extend([0]*len(moments[video_emb.size(0)]))
+                ground_truth.extend([0]*len(moments[video_emb.size(0)]))
 
         # sort all moments from all videos by distances
-        correct = np.array(correct, dtype=int)[np.argsort(distances)]
+        ground_truth = np.array(ground_truth, dtype=int)
+        predict = ground_truth[np.argsort(distances)]
+        chance = ground_truth[np.random.choice(np.arange(len(ground_truth)), size=len(ground_truth), replace=False)]
         for k in recalls.keys():
             if k == 'MR':
                 # median rank: index position of first correct moment
-                recalls[k].append(np.where(correct == 1)[0][0])
+                recalls[k].append(np.where(predict == 1)[0][0])
+                recalls_chance[k].append(np.where(chance == 1)[0][0])
             else:
                 # Recall@K: 1 if correct moment is among in top-K moments, 0 otherwise
-                recalls[k].append(int(correct[:k].sum() > 0))
+                recalls[k].append(int(predict[:k].sum() > 0))
+                recalls_chance[k].append(int(chance[:k].sum() > 0))
 
         if (li % preliminary == 0) and (li != 0):
-            metrics = {}
-            for name, value in recalls.items():
-                if name == 'MR':
-                    metrics[name] = np.median(value)
-                else:
-                    metrics[f'R@{name}'] = np.mean(value)
-            print(''.join([f'{name}: {value:.4f}\t' for name, value in metrics.items()]))
+            print('\nModel:', ''.join([f'{name}: {value:.4f}\t' for name, value in get_metrics(recalls).items()]))
+            print('Chance:',''.join([f'{name}: {value:.4f}\t' for name, value in get_metrics(recalls_chance).items()]))
+            print()
 
-    metrics = {} # average metrics for all queries
-    for name, value in recalls.items():
-        if name == 'MR':
-            metrics[name] = np.median(value)
-        else:
-            metrics[f'R@{name}'] = np.mean(value)
-    
-    return metrics
+    return get_metrics(recalls)
 
 
 if __name__ == '__main__':
@@ -92,6 +94,7 @@ if __name__ == '__main__':
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--validation", type=str, default='val')
     parser.add_argument("--preliminary_print", type=int, default=100)
+    parser.add_argument("--iou", type=float, default=0.5)
     args = parser.parse_args()
 
     FT_DIRECTORY = args.features_dir
@@ -114,15 +117,16 @@ if __name__ == '__main__':
     # load state dict
     state = torch.load(Path(EXPER_DIRECTORY).joinpath('last.pth'))
     FEATURE_TYPE = state['ft_type']
-    print(DEVICE, FEATURE_TYPE, DATASET_TYPE)
+    print(DEVICE, FEATURE_TYPE, DATASET_TYPE, args.iou)
 
     print('Loading validation dataset:')
     val_annotations, val_videos = utils.load_dataset_info(DATASET_TYPE, DATASET_DIRECTORY, args.missed_videos)
+
     val_dataset = data.CustomDataset(val_videos, val_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, validate=True)
     val_video_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
         batch_sampler=data.VideoBatchSampler(val_videos, val_dataset.num_segments_info))
     val_lang_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
-        batch_sampler=data.LanguageBatchSampler(val_annotations, val_dataset.num_segments_info, 0.5))
+        batch_sampler=data.LanguageBatchSampler(val_annotations, val_dataset.num_segments_info, args.iou))
     
     model = models.CALModel(
         pretrained_emb=word_indexer.get_embeddings(),
@@ -131,7 +135,8 @@ if __name__ == '__main__':
     )
     model.load_state_dict(state['model_state_dict'])
     model = model.to(DEVICE)    
-    
+    model.eval()
+
     # evaluate model with exhaustive search
     metrics = evaluate(model, val_video_iter, val_lang_iter, DEVICE, args.preliminary_print)
     print(''.join([f'{name}: {value:.4f}\t' for name, value in metrics.items()]))

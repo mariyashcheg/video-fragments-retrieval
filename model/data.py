@@ -288,13 +288,7 @@ class CustomBatchSampler(BatchSampler):
                 
         if len(batch) > 0 and not self.drop_last:
             yield batch
-            
-    # def __len__(self):
-    #     if self.drop_last:
-    #         return len(self.annotations) // self.batch_size
-    #     else:
-    #         return (len(self.annotations) + self.batch_size - 1) // self.batch_size
-
+ 
 
 def custom_collate(batch):
     mask = []
