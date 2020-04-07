@@ -47,14 +47,14 @@ class Trainer:
             inter_emb = model(inter_ft)
             lang_emb = model(lang_ft, False, self.device)
             
-            loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)        
+            loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)        
             epoch_loss += loss.item()
-            count_loss += 1
+            count_loss += n_samples
             loss.backward()
             optimizer.step()
 
             log_entry = dict(
-                loss=loss.item()
+                loss=loss.item() / n_samples
             )
             if self.compute_grads:
                 log_entry['grad_norm'] = self.grad_norm(model)
@@ -87,9 +87,9 @@ class Trainer:
                 inter_emb = model(inter_ft)
                 lang_emb = model(lang_ft, False, self.device)
                 
-                loss = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)
+                loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)
                 epoch_loss += loss.item()
-                count_loss += 1
+                count_loss += n_samples
         
         log_entry = dict(
             loss=epoch_loss / count_loss
@@ -110,8 +110,8 @@ class Trainer:
             c_posit = F.pairwise_distance(posit_emb[mask_i], lang_emb[i].repeat(posit_emb[mask_i].size(0), 1)).mean()
             c_intra = F.pairwise_distance(intra_emb[mask_i], lang_emb[i].repeat(intra_emb[mask_i].size(0), 1)).mean()
             c_inter = F.pairwise_distance(inter_emb[mask_i], lang_emb[i].repeat(inter_emb[mask_i].size(0), 1)).mean()
-            loss += (F.relu(c_posit - c_inter + self.b) + self.lamb*F.relu(c_posit - c_intra + self.b))
-        return loss
+            loss += (F.relu(c_posit - c_intra + self.b) + self.lamb*F.relu(c_posit - c_inter + self.b))
+        return loss, n_samples
 
     @staticmethod
     def grad_norm(model):
@@ -195,7 +195,8 @@ if __name__ == '__main__':
         emb_dim=data.EMBEDDING_DIM, 
     )
 
-    optimizer = optim.SGD(model.parameters(), lr=0.05, momentum=0.95)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.1)
+    # optimizer = optim.SGD(model.parameters(), lr=0.05, momentum=0.95)
     scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
     
     for epoch in range(N_EPOCHES):
