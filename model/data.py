@@ -7,6 +7,8 @@ import torch.nn as nn
 import itertools
 from collections import defaultdict
 
+from utils import generate_moments, get_iou
+
 from tqdm import tqdm
 from pathlib import Path
 from torch.utils.data.dataset import Dataset
@@ -209,12 +211,13 @@ class CustomDataset(Dataset):
 
 class CustomBatchSampler(BatchSampler):
 
-    def __init__(self, batch_size, annotations, num_segments_info, train=True, drop_last=False):
+    def __init__(self, batch_size, annotations, num_segments_info, train=True, drop_last=False, same_length=True):
         self.batch_size = batch_size
         self.annotations = annotations
         self.num_segments_info = num_segments_info
         self.train = train
         self.drop_last = drop_last
+        self.same_length = same_length
         self.indices = defaultdict(list)
         for video, num_segments in self.num_segments_info.items():
             self.indices[num_segments].append(video)
@@ -231,13 +234,13 @@ class CustomBatchSampler(BatchSampler):
             if num_segments <= num:
                 possible_videos.extend(self.indices[num])
         return possible_videos
-        
+            
     def __iter__(self):
         annotation_ids = list(self.annotations.keys())
         if self.train:
             random.shuffle(annotation_ids)
         batch = []
-        curr_batch_size = 0
+        posit_batch_size, intra_batch_size = 0, 0
         
         for annot_id in annotation_ids:
             annot_info = self.annotations[annot_id]
@@ -254,8 +257,12 @@ class CustomBatchSampler(BatchSampler):
             possible_segments = [(j,j) for j in range(num_segments)]
             for j in itertools.combinations(range(num_segments), 2):
                 possible_segments.append(j)
-            possible_segments = [segment for segment in possible_segments 
+            if self.same_length:
+                possible_segments = [segment for segment in possible_segments 
                         if (segment[1] - segment[0]) == (end_t - start_t) and (segment != (start_t, end_t))]
+            else:
+                possible_segments = [segment for segment in possible_segments 
+                        if get_iou(annot_info['times'], segment[0], segment[1]).max() < 1]
             if self.train:
                 start_tn, end_tn = random.choice(possible_segments)    
             else:
@@ -279,32 +286,34 @@ class CustomBatchSampler(BatchSampler):
                 start_tn=start_tn,
                 end_tn=end_tn
             ))
-            curr_batch_size += (end_t - start_t + 1)
+            posit_batch_size += (end_t - start_t + 1)
+            intra_batch_size += (end_tn - start_tn + 1)
             
-            if int(curr_batch_size) >= self.batch_size:
+            if max(posit_batch_size, intra_batch_size) >= self.batch_size:
                 yield batch
                 batch = []
-                curr_batch_size = 0
+                posit_batch_size, intra_batch_size = 0, 0
                 
         if len(batch) > 0 and not self.drop_last:
             yield batch
  
 
 def custom_collate(batch):
-    mask = []
-    posit, intra, inter, lang = [], [], [], []
+    posit, intra, inter, lang, mask_posit, mask_intra = [], [], [], [], [], []
     for i, sample in enumerate(batch):
         posit.append(sample['posit'])
         intra.append(sample['intra'])
         inter.append(sample['inter'])
         lang.append(sample['lang'])
-        mask.extend([i]*sample['posit'].size(0))
+        mask_posit.extend([i]*sample['posit'].size(0))
+        mask_intra.extend([i]*sample['intra'].size(0))
     return dict(
         posit=torch.cat(posit, axis=0),
         intra=torch.cat(intra, axis=0), 
         inter=torch.cat(inter, axis=0), 
         lang=torch.cat(lang, axis=0),
-        mask=torch.LongTensor(mask)
+        maskp=torch.LongTensor(mask_posit),
+        maskn=torch.LongTensor(mask_intra)
     )
 
 
@@ -336,37 +345,26 @@ class LanguageBatchSampler(BatchSampler):
         self.annotations = annotations
         self.num_segments_info = num_segments_info
         self.iou_threshold = iou_threshold
-        self.moments = {num_seg: self.generate_moments(num_seg) for num_seg in range(7)}
+        self.moments = {num_seg: generate_moments(num_seg) for num_seg in range(7)}
         
-    def generate_moments(self, num_segments):
-        moments = [(j,j) for j in range(num_segments)]
-        for j in itertools.combinations(range(num_segments), 2):
-            moments.append(j)
-        return moments
-
     def get_annotations(self, annot_id):
         annot_info = self.annotations[annot_id]
         annotations = np.array(annot_info['times'])
         annotations = annotations[annotations[:, 1] <= self.num_segments_info[annot_info['video']]]
         return annotations
     
-    def get_iou(self, annot_id, start_t, end_t):
-        times = np.array(self.annotations[annot_id]['times'])
-        intersection = np.maximum(np.minimum(times[:, 1], end_t) + 1 - np.maximum(times[:, 0], start_t), 0)
-        union = np.maximum(times[:, 1], end_t) + 1 - np.minimum(times[:, 0], start_t)
-        return int(((intersection / union) > self.iou_threshold).sum() >= 2)
-    
     def __iter__(self):
         batch = []
         for annot_id in list(self.annotations.keys()):
             annot_info = self.annotations[annot_id]
             num_segments = self.num_segments_info[annot_info['video']]
-            
+            ious = [int((get_iou(annot_id, start_t, end_t) > self.iou_threshold).sum() >= 2)
+                                        for start_t, end_t in self.moments[num_segments]]
             batch.append(
                 dict(
                     annotation_id=annot_id,
                     video_pos=annot_info['video'],
-                    iou=[self.get_iou(annot_id, start_t, end_t) for start_t, end_t in self.moments[num_segments]]
+                    iou=ious
                 )
             )
             yield batch

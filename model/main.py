@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import StepLR
 
 class Trainer:
 
-    def __init__(self, train_writer, test_writer, compute_grads=True, device=None, b=0.1, lamb=0.4):
+    def __init__(self, train_writer, test_writer, normalize_loss=False, compute_grads=True, device=None, b=0.1, lamb=0.4):
         self.device = device
         self.train_writer = train_writer
         self.test_writer = test_writer
@@ -27,6 +27,7 @@ class Trainer:
         self.global_step = 0
         self.b = b
         self.lamb = lamb
+        self.normalize_loss = normalize_loss
 
     def train_epoch(self, model, iterator, optimizer, log_prefix=''):
         
@@ -39,7 +40,8 @@ class Trainer:
             intra_ft = batch['intra'].to(self.device)
             inter_ft = batch['inter'].to(self.device)
             lang_ft = batch['lang'].to(self.device)
-            mask = batch['mask'].to(self.device)
+            maskp = batch['maskp'].to(self.device)
+            maskn = batch['maskn'].to(self.device)
 
             optimizer.zero_grad()
             posit_emb = model(posit_ft)
@@ -47,7 +49,7 @@ class Trainer:
             inter_emb = model(inter_ft)
             lang_emb = model(lang_ft, False, self.device)
             
-            loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)        
+            loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, maskp, maskn)        
             epoch_loss += loss.item()
             count_loss += n_samples
             loss.backward()
@@ -79,7 +81,9 @@ class Trainer:
             intra_ft = batch['intra'].to(self.device)
             inter_ft = batch['inter'].to(self.device)
             lang_ft = batch['lang'].to(self.device)
-            mask = batch['mask'].to(self.device)
+            maskp = batch['maskp'].to(self.device)
+            maskn = batch['maskn'].to(self.device)
+
 
             with torch.no_grad():
                 posit_emb = model(posit_ft)
@@ -87,7 +91,7 @@ class Trainer:
                 inter_emb = model(inter_ft)
                 lang_emb = model(lang_ft, False, self.device)
                 
-                loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, mask)
+                loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, maskp, maskn)
                 epoch_loss += loss.item()
                 count_loss += n_samples
         
@@ -101,15 +105,23 @@ class Trainer:
         
         return log_entry['loss']
 
-    def ranking_loss(self, posit_emb, intra_emb, inter_emb, lang_emb, mask):
+    def ranking_loss(self, posit_emb, intra_emb, inter_emb, lang_emb, maskp, maskn):
 
         loss = 0
-        n_samples = mask.max().item()+1
+        n_samples = maskp.max().item()+1
+
+        if self.normalize_loss:
+            posit_emb = posit_emb.div(posit_emb.norm(dim=1, keepdim=True) + 1e-5)
+            intra_emb = intra_emb.div(intra_emb.norm(dim=1, keepdim=True) + 1e-5)
+            inter_emb = inter_emb.div(inter_emb.norm(dim=1, keepdim=True) + 1e-5)
+            lang_emb = lang_emb.div(lang_emb.norm(dim=1, keepdim=True) + 1e-5) 
+
         for i in range(n_samples):
-            mask_i = mask == i
-            c_posit = F.pairwise_distance(posit_emb[mask_i], lang_emb[i].repeat(posit_emb[mask_i].size(0), 1)).mean()
-            c_intra = F.pairwise_distance(intra_emb[mask_i], lang_emb[i].repeat(intra_emb[mask_i].size(0), 1)).mean()
-            c_inter = F.pairwise_distance(inter_emb[mask_i], lang_emb[i].repeat(inter_emb[mask_i].size(0), 1)).mean()
+            maskp_i = maskp == i
+            maskn_i = maskn == i
+            c_posit = F.pairwise_distance(posit_emb[maskp_i], lang_emb[i].repeat(posit_emb[maskp_i].size(0), 1)).mean()
+            c_intra = F.pairwise_distance(intra_emb[maskn_i], lang_emb[i].repeat(intra_emb[maskn_i].size(0), 1)).mean()
+            c_inter = F.pairwise_distance(inter_emb[maskp_i], lang_emb[i].repeat(inter_emb[maskp_i].size(0), 1)).mean()
             loss += (F.relu(c_posit - c_intra + self.b) + self.lamb*F.relu(c_posit - c_inter + self.b))
         return loss, n_samples
 
@@ -119,9 +131,10 @@ class Trainer:
         count = 0
         for name, tensor in model.named_parameters():
             if tensor.grad is not None:
-                grad += torch.sqrt(torch.sum((tensor.grad.data) ** 2))
+                grad += tensor.grad.data.norm().cpu().item()
+                # grad += torch.sqrt(torch.sum((tensor.grad.data) ** 2))
                 count += 1
-        return grad.cpu().numpy() / count
+        return grad / count #.cpu().numpy()
 
 
 if __name__ == '__main__':
@@ -140,6 +153,9 @@ if __name__ == '__main__':
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--feature_type", type=str, default=None)
     parser.add_argument("--missed_videos", type=str, default='../')
+    parser.add_argument("--normalize_loss", type=utils.str2bool, default=False)
+    parser.add_argument("--intra_same_length", type=utils.str2bool, default=True)
+    parser.add_argument("--normalize_lang", type=utils.str2bool, default=False)
     args = parser.parse_args()
 
     FT_DIRECTORY = args.features_dir
@@ -175,15 +191,18 @@ if __name__ == '__main__':
     test_dataset = data.CustomDataset(test_videos, test_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
     
     train_iter = DataLoader(train_dataset, shuffle=False, collate_fn=data.custom_collate, 
-        batch_sampler=data.CustomBatchSampler(BATCH_SIZE, train_annotations, train_dataset.num_segments_info))    
+        batch_sampler=data.CustomBatchSampler(
+            BATCH_SIZE, train_annotations, train_dataset.num_segments_info, same_length=args.intra_same_length))    
     test_iter = DataLoader(test_dataset, shuffle=False, collate_fn=data.custom_collate, 
-        batch_sampler=data.CustomBatchSampler(BATCH_SIZE, test_annotations, test_dataset.num_segments_info, train=False))
+        batch_sampler=data.CustomBatchSampler(
+            BATCH_SIZE, test_annotations, test_dataset.num_segments_info, train=False, same_length=args.intra_same_length))
     
     new_experiment = utils.start_new_experiment(EXPER_DIRECTORY)
     print('\nStart training:')
     trainer = Trainer(
         train_writer=SummaryWriter(new_experiment.joinpath('train_logs')),
         test_writer=SummaryWriter(new_experiment.joinpath('test_logs')),
+        normalize_loss=args.normalize_loss,
         compute_grads=True, 
         device=DEVICE, 
         b=0.1, lamb=0.4
@@ -193,12 +212,14 @@ if __name__ == '__main__':
         pretrained_emb=word_indexer.get_embeddings(),
         visual_input_dim=data.FEATURE_DIM[FEATURE_TYPE]*2+2,
         emb_dim=data.EMBEDDING_DIM, 
+        normalize_lang=args.normalize_lang
     )
 
     optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.1)
     # optimizer = optim.SGD(model.parameters(), lr=0.05, momentum=0.95)
     scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
     
+    best_loss = None
     for epoch in range(N_EPOCHES):
 
         train_loss = trainer.train_epoch(model, train_iter, optimizer)
@@ -214,4 +235,9 @@ if __name__ == '__main__':
             global_step=trainer.global_step,
         )
         torch.save(state, new_experiment.joinpath('last.pth'))
+        if best_loss is None:
+            best_loss = test_loss
+        elif test_loss < best_loss:
+            best_loss = test_loss
+            torch.save(state, new_experiment.joinpath('best.pth'))
         print(f'Epoch: {epoch+1:02},\tTrain Loss: {train_loss:.4f},\tTest Loss: {test_loss:.4f}')

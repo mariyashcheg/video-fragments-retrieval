@@ -1,4 +1,6 @@
 import json
+import numpy as np
+import itertools
 import re
 from pathlib import Path
 
@@ -52,3 +54,25 @@ def start_new_experiment(exper_dir):
     Path(new_exper_dir).mkdir(exist_ok=False)
     return new_exper_dir
 
+
+def str2bool(param):
+    if str(param).lower() == 'true':
+        return True
+    elif str(param).lower() == 'false':
+        return False
+    else:
+        return None
+
+
+def generate_moments(num_segments):
+    moments = [(j,j) for j in range(num_segments)]
+    for j in itertools.combinations(range(num_segments), 2):
+        moments.append(j)
+    return moments
+
+
+def get_iou(times, start_t, end_t):
+    times = np.array(times)
+    intersection = np.maximum(np.minimum(times[:, 1], end_t) + 1 - np.maximum(times[:, 0], start_t), 0)
+    union = np.maximum(times[:, 1], end_t) + 1 - np.minimum(times[:, 0], start_t)
+    return intersection / union

@@ -6,9 +6,11 @@ from data import EMBEDDING_DIM
 
 class CALModel(nn.Module):
 
-    def __init__(self, pretrained_emb, visual_input_dim, emb_dim=EMBEDDING_DIM, hidden_size=1000, dropout_rate=0.3):
+    def __init__(self, pretrained_emb, visual_input_dim, emb_dim=EMBEDDING_DIM, hidden_size=1000, 
+                    dropout_rate=0.3, normalize_lang=False):
         super(CALModel, self).__init__()
         self.hidden_size = hidden_size
+        self.normalize_lang = normalize_lang
         
         # visual 
         self.visual_fc = nn.Sequential(
@@ -21,6 +23,10 @@ class CALModel(nn.Module):
         # language
         self.word_embedding = nn.Embedding.from_pretrained(
             embeddings=pretrained_emb, freeze=True, padding_idx=0)
+
+        if self.normalize_lang:
+            self.learnable_length = nn.Embedding.from_pretrained(
+                embeddings=torch.ones(pretrained_emb.size(0), 1), freeze=False, padding_idx=0)
         
         self.lstm = nn.LSTM(
             input_size=pretrained_emb.size(1),
@@ -40,6 +46,9 @@ class CALModel(nn.Module):
             output = self.visual_fc(batch)
         else:
             embedded = self.word_embedding(batch)
+            if self.normalize_lang:
+                length = self.learnable_length(batch)
+                embedded = embedded.div(embedded.norm(dim=-1, keepdim=True) + 1e-5)*length
             _, hidden = self.lstm(embedded, self.init_hidden(batch.size(0), device))
             output = self.lang_fc(hidden[0].transpose(0,1).reshape(batch.size(0), 2*self.hidden_size))
 
