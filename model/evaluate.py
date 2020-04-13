@@ -25,7 +25,8 @@ def get_metrics(recalls):
             metrics[f'R@{name}'] = np.mean(value)*100
     return metrics
 
-def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, compute=['model']):
+def evaluate(model, video_iterator, lang_iterator, annotations, device, preliminary=100, 
+                model_types=['model'], iou_thresholds=[0.5,0.7]):
 
     videos = {}
     # compute embeddings for all clips in each unique video in dataset
@@ -33,7 +34,8 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, comp
         with torch.no_grad():
             videos[batch['video']] = model(batch['feature'].to(device))
 
-    recalls = {model_type: {1: [], 10: [], 100: [], 'MR':[]} for model_type in compute}
+    recalls = {(model_type, iou_thr): {1: [], 10: [], 100: [], 'MR':[]} 
+        for (model_type, iou_thr) in itertools.product(model_types, iou_thresholds)}
     moments = lang_iterator.batch_sampler.moments
     print('\nEvaluation:')
     # compute embeddings for all queries in dataset
@@ -41,7 +43,9 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, comp
         with torch.no_grad():
             lang_emb = model(batch['feature'].to(device), False, device)
 
-        distances, ground_truth = [],[]
+        # ground truth: 1 if IoU between moment and at least 2 manual annotations is greater the threshold
+        # for incorrect videos all IoU score are 0
+        distances, predicts = [], {key: [] for key in recalls.keys()}
         for video in videos.keys():
             video_emb = videos[video]
             num_segments = video_emb.size(0)
@@ -50,37 +54,40 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, comp
             # for each possible moment in video compute distance between moment and query
             # as sum of distances between clips in the moment and query (precomputed on prev step)
             # (15 possible moments for video of 5 clips, 21 - for 6 clips)
-            distances.extend([dist.index_select(0, torch.arange(start_t, end_t+1).to(device)).mean().item() 
-                                for start_t, end_t in moments[num_segments]])
-            # ground truth: 1 if IoU between moment and at least 2 manual annotations is greater the threshold
-            # for incorrect videos all IoU score are 0
-            if video == batch['video']:
-                ground_truth.extend(batch['iou'])
-            else:
-                ground_truth.extend([0]*len(moments[num_segments]))
+            for start_t, end_t in moments[num_segments]:
+                distances.append(dist.index_select(0, torch.arange(start_t, end_t+1).to(device)).mean().item())
+                if video == batch['video']:
+                    ious = utils.get_iou(annotations[batch['annot_id']]['times'], start_t, end_t)
+                    for iou_thr in iou_thresholds:
+                        predicts[('model', iou_thr)].append(int(( ious > iou_thr ).sum() >= 2))
+                else:
+                    for iou_thr in iou_thresholds:
+                        predicts[('model', iou_thr)].append(0)
 
         # sort all moments from all videos by distances
-        ground_truth = np.array(ground_truth, dtype=int)
-        predict = {'model': ground_truth[np.argsort(distances)]}
-        if 'chance' in recalls.keys():
-            predict['chance'] = ground_truth[np.random.choice(
-                np.arange(len(ground_truth)), size=len(ground_truth), replace=False)]
-        for model_type in recalls.keys():
-            for k in recalls[model_type].keys():
-                if k == 'MR':
-                    # median rank: index position of first correct moment
-                    recalls[model_type][k].append(np.where(predict[model_type] == 1)[0][0])
-                else:
-                    # Recall@K: 1 if correct moment is among in top-K moments, 0 otherwise
-                    recalls[model_type][k].append(int(predict[model_type][:k].sum() > 0))
+        ind_rand = np.random.choice(np.arange(len(distances)), size=len(distances), replace=False)
+        for iou_thr in iou_thresholds:
+            ground_truth = np.array(predicts[('model',iou_thr)], dtype=int)
+            predicts[('model', iou_thr)] = ground_truth[np.argsort(distances)]
+            predicts[('chance',iou_thr)] = ground_truth[ind_rand]
+            for model_type in model_types:
+                for k in recalls[(model_type, iou_thr)].keys():
+                    if k == 'MR':
+                        # median rank: index position of first correct moment
+                        recalls[(model_type, iou_thr)][k].append(np.where(predicts[(model_type, iou_thr)] == 1)[0][0])
+                    else:
+                        # Recall@K: 1 if correct moment is among in top-K moments, 0 otherwise
+                        recalls[(model_type, iou_thr)][k].append(int(predicts[(model_type, iou_thr)][:k].sum() > 0))
 
         if (li % preliminary == 0) and (li != 0):
             print()
-            for model_type in recalls.keys():
-                print(f'{model_type}:', ''.join([f'{name}: {value:.4f}\t' for name, value in get_metrics(recalls[model_type]).items()]))
+            for (model_type, iou_thr) in recalls.keys():
+                print(f'{model_type}, IoU={iou_thr}:\t', ''.join([f'{name}: {value:.4f}\t' 
+                    for name, value in get_metrics(recalls[(model_type, iou_thr)]).items()]))
             print()
 
-    return {model_type: get_metrics(recalls[model_type]) for model_type in recalls.keys()}
+    return {f'{model_type}, IoU={iou_thr}': get_metrics(recalls[(model_type, iou_thr)]) 
+                            for (model_type, iou_thr) in recalls.keys()}
 
 
 if __name__ == '__main__':
@@ -171,10 +178,11 @@ if __name__ == '__main__':
 
     # evaluate model with exhaustive search
     metrics = evaluate(
-        model, val_video_iter, val_lang_iter, DEVICE, args.preliminary_print, MODEL_TYPES
-        )
-    for model_type in metrics.keys():
-        print(f'{model_type}:',''.join([f'{name}: {value:.4f}\t' for name, value in metrics[model_type].items()]))
+        model, val_video_iter, val_lang_iter, val_annotations, DEVICE, args.preliminary_print, MODEL_TYPES)
 
-    with open(Path(EXPER_DIRECTORY).joinpath('metrics.join'), 'w') as f:
+    for (model_type, iou_thr) in metrics.keys():
+        print(f'{model_type}, IoU={iou_thr}:\t',''.join([f'{name}: {value:.4f}\t' 
+            for name, value in metrics[(model_type, iou_thr)].items()]))
+
+    with open(Path(EXPER_DIRECTORY).joinpath('metrics.json'), 'w') as f:
         json.dump(metrics, f)

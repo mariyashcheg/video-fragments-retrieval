@@ -177,13 +177,12 @@ class CustomDataset(Dataset):
         
     def __getitem__(self, sample):
         if self.validate:
-            if 'iou' in sample.keys():
+            if 'annotation_id' in sample.keys():
                 # language
                 lang_features = self.lang_features[sample['annotation_id']]
                 return dict(
                     features=lang_features,
                     video=sample['video_pos'],
-                    iou=sample['iou'],
                     annot_id=sample['annotation_id']
                 )
             else:
@@ -342,10 +341,9 @@ class VideoBatchSampler(BatchSampler):
 
 class LanguageBatchSampler(BatchSampler):
 
-    def __init__(self, annotations, num_segments_info, iou_threshold):
+    def __init__(self, annotations, num_segments_info):
         self.annotations = annotations
         self.num_segments_info = num_segments_info
-        self.iou_threshold = iou_threshold
         self.moments = {num_seg: generate_moments(num_seg) for num_seg in range(7)}
         
     def get_annotations(self, annot_id):
@@ -359,13 +357,10 @@ class LanguageBatchSampler(BatchSampler):
         for annot_id in list(self.annotations.keys()):
             annot_info = self.annotations[annot_id]
             num_segments = self.num_segments_info[annot_info['video']]
-            ious = [int((get_iou(annot_info['times'], start_t, end_t) > self.iou_threshold).sum() >= 2)
-                                        for start_t, end_t in self.moments[num_segments]]
             batch.append(
                 dict(
                     annotation_id=annot_id,
                     video_pos=annot_info['video'],
-                    iou=ious
                 )
             )
             yield batch
@@ -376,11 +371,9 @@ class LanguageBatchSampler(BatchSampler):
 
 
 def validate_collate(batch):
-    iou = batch[0]['iou'] if 'iou' in batch[0].keys() else []
     annot_id = batch[0]['annot_id'] if 'annot_id' in batch[0].keys() else []
     return dict(
         feature=batch[0]['features'],
         video=batch[0]['video'],
-        iou=iou,
         annot_id=annot_id
     )
