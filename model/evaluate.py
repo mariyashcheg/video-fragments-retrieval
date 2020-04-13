@@ -25,7 +25,7 @@ def get_metrics(recalls):
             metrics[f'R@{name}'] = np.mean(value)*100
     return metrics
 
-def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, compute=['model'], prior={}):
+def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, compute=['model']):
 
     videos = {}
     # compute embeddings for all clips in each unique video in dataset
@@ -41,7 +41,7 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, comp
         with torch.no_grad():
             lang_emb = model(batch['feature'].to(device), False, device)
 
-        distances, ground_truth, prior_predict = [],[], []
+        distances, ground_truth = [],[]
         for video in videos.keys():
             video_emb = videos[video]
             num_segments = video_emb.size(0)
@@ -52,8 +52,6 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, comp
             # (15 possible moments for video of 5 clips, 21 - for 6 clips)
             distances.extend([dist.index_select(0, torch.arange(start_t, end_t+1).to(device)).mean().item() 
                                 for start_t, end_t in moments[num_segments]])
-            if 'prior' in recalls.keys():
-                prior_predict.extend([(iou, num_segments) for iou in batch['iou']])
             # ground truth: 1 if IoU between moment and at least 2 manual annotations is greater the threshold
             # for incorrect videos all IoU score are 0
             if video == batch['video']:
@@ -67,8 +65,6 @@ def evaluate(model, video_iterator, lang_iterator, device, preliminary=100, comp
         if 'chance' in recalls.keys():
             predict['chance'] = ground_truth[np.random.choice(
                 np.arange(len(ground_truth)), size=len(ground_truth), replace=False)]
-        if 'prior' in recalls.keys():
-            pass
         for model_type in recalls.keys():
             for k in recalls[model_type].keys():
                 if k == 'MR':
@@ -104,6 +100,7 @@ if __name__ == '__main__':
     parser.add_argument("--preliminary_print", type=int, default=100)
     parser.add_argument("--iou", type=float, default=0.5)
     parser.add_argument("--model_types", type=str, nargs='+', default=[])
+    parser.add_argument("--normalize_lang", type=utils.str2bool, default=False)
     args = parser.parse_args()
 
     FT_DIRECTORY = args.features_dir
@@ -127,7 +124,7 @@ if __name__ == '__main__':
     state = torch.load(Path(EXPER_DIRECTORY).joinpath('last.pth'))
     FEATURE_TYPE = state['ft_type']
     MODEL_TYPES = [model_type for model_type in args.model_types
-                            if model_type in ['model','chance','prior']]
+                            if model_type in ['model','chance']]
     if MODEL_TYPES == []:
         MODEL_TYPES = ['model']
     print(DEVICE, FEATURE_TYPE, DATASET_TYPE, args.iou, MODEL_TYPES)
@@ -166,6 +163,7 @@ if __name__ == '__main__':
         pretrained_emb=word_indexer.get_embeddings(),
         visual_input_dim=data.FEATURE_DIM[FEATURE_TYPE]*2+2,
         emb_dim=data.EMBEDDING_DIM, 
+        normalize_lang=args.normalize_lang
     )
     model.load_state_dict(state['model_state_dict'])
     model = model.to(DEVICE)    
@@ -173,7 +171,7 @@ if __name__ == '__main__':
 
     # evaluate model with exhaustive search
     metrics = evaluate(
-        model, val_video_iter, val_lang_iter, DEVICE, args.preliminary_print, MODEL_TYPES, moment_frequency
+        model, val_video_iter, val_lang_iter, DEVICE, args.preliminary_print, MODEL_TYPES
         )
     for model_type in metrics.keys():
         print(f'{model_type}:',''.join([f'{name}: {value:.4f}\t' for name, value in metrics[model_type].items()]))

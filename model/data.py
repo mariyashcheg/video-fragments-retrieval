@@ -183,7 +183,8 @@ class CustomDataset(Dataset):
                 return dict(
                     features=lang_features,
                     video=sample['video_pos'],
-                    iou=sample['iou']
+                    iou=sample['iou'],
+                    annot_id=sample['annotation_id']
                 )
             else:
                 # video 
@@ -358,7 +359,7 @@ class LanguageBatchSampler(BatchSampler):
         for annot_id in list(self.annotations.keys()):
             annot_info = self.annotations[annot_id]
             num_segments = self.num_segments_info[annot_info['video']]
-            ious = [int((get_iou(annot_id, start_t, end_t) > self.iou_threshold).sum() >= 2)
+            ious = [int((get_iou(annot_info['times'], start_t, end_t) > self.iou_threshold).sum() >= 2)
                                         for start_t, end_t in self.moments[num_segments]]
             batch.append(
                 dict(
@@ -376,8 +377,10 @@ class LanguageBatchSampler(BatchSampler):
 
 def validate_collate(batch):
     iou = batch[0]['iou'] if 'iou' in batch[0].keys() else []
+    annot_id = batch[0]['annot_id'] if 'annot_id' in batch[0].keys() else []
     return dict(
         feature=batch[0]['features'],
         video=batch[0]['video'],
-        iou=iou
+        iou=iou,
+        annot_id=annot_id
     )

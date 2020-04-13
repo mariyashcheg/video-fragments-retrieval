@@ -231,7 +231,8 @@ if __name__ == '__main__':
             model_state_dict=model.state_dict(),
             optimizer_state_dict=optimizer.state_dict(),
             loss=test_loss,
-            ft_type=FEATURE_TYPE,
+            params={param: value for param, value in args.items() 
+                            if param in ['device','feature_type','normalize_loss','normalize_lang']},
             global_step=trainer.global_step,
         )
         torch.save(state, new_experiment.joinpath('last.pth'))
