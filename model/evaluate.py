@@ -129,7 +129,10 @@ if __name__ == '__main__':
 
     # load state dict
     state = torch.load(Path(EXPER_DIRECTORY).joinpath('last.pth'))
-    FEATURE_TYPE = state['ft_type']
+    FEATURE_TYPE = state['params']['feature_type']
+    POOLING = state['params']['pooling']
+    normalize_lang = state['params']['normalize_lang']
+    normalize_loss = state['params']['normalize_loss']
     MODEL_TYPES = [model_type for model_type in args.model_types
                             if model_type in ['model','chance']]
     if MODEL_TYPES == []:
@@ -141,7 +144,8 @@ if __name__ == '__main__':
         
         print('Loading train dataset:')
         train_annotations, train_videos = utils.load_dataset_info('train', DATASET_DIRECTORY, args.missed_videos)
-        train_dataset = data.CustomDataset(train_videos, train_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
+        train_dataset = data.CustomDataset(
+            train_videos, train_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, pooling=POOLING)
 
         for _, annot_info in train_annotations.items():
             num_segments = train_dataset.num_segments_info[annot_info['video']]
@@ -164,7 +168,7 @@ if __name__ == '__main__':
     val_video_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
         batch_sampler=data.VideoBatchSampler(val_videos, val_dataset.num_segments_info))
     val_lang_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
-        batch_sampler=data.LanguageBatchSampler(val_annotations, val_dataset.num_segments_info, args.iou))
+        batch_sampler=data.LanguageBatchSampler(val_annotations, val_dataset.num_segments_info))
     
     model = models.CALModel(
         pretrained_emb=word_indexer.get_embeddings(),
@@ -180,9 +184,9 @@ if __name__ == '__main__':
     metrics = evaluate(
         model, val_video_iter, val_lang_iter, val_annotations, DEVICE, args.preliminary_print, MODEL_TYPES)
 
-    for (model_type, iou_thr) in metrics.keys():
-        print(f'{model_type}, IoU={iou_thr}:\t',''.join([f'{name}: {value:.4f}\t' 
-            for name, value in metrics[(model_type, iou_thr)].items()]))
+    for model_type in metrics.keys():
+        print(f'{model_type}\t',''.join([f'{name}: {value:.4f}\t' 
+            for name, value in metrics[model_type].items()]))
 
     with open(Path(EXPER_DIRECTORY).joinpath('metrics.json'), 'w') as f:
         json.dump(metrics, f)

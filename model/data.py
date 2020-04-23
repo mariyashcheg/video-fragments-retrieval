@@ -21,6 +21,9 @@ SEC_PER_SEGMENT = 5
 FEATURE_DIM = dict(
     vgg19=4096,
     resnet152=2048)
+POOLING = dict(
+    avg=np.mean,
+    max=np.max)
 EMBEDDING_DIM = 100
 PAD_TOKEN = "<pad>"
 UNK_TOKEN = "<unk>"
@@ -116,13 +119,14 @@ class WordIndexer():
 
 class CustomDataset(Dataset):
 
-    def __init__(self, videos, annotations, word_indexer, ft_directory, ft_type, validate=False, max_query_len=50):
+    def __init__(self, videos, annotations, word_indexer, ft_directory, ft_type, validate=False, max_query_len=50, pooling='avg'):
         self.word_indexer = word_indexer
         self.max_query_len = max_query_len
         self.ft_directory = ft_directory
         self.ft_type = ft_type
         self.num_segments_info = {}
         self.validate = validate
+        self.pooling = pooling
         # unique video
         self.video_features = {}
         self.load_video_features(videos)
@@ -143,11 +147,12 @@ class CustomDataset(Dataset):
             # segment features = average features for all frames in segment
             segment_features = np.zeros((num_segments, FEATURE_DIM[self.ft_type]))
             for i in range(segment_features.shape[0]):
-                features = np.mean(video_features[i*FRAMES_PER_SEC:(i+1)*FRAMES_PER_SEC, :], axis=0)
+                features = POOLING[self.pooling](
+                    video_features[i*FRAMES_PER_SEC*SEC_PER_SEGMENT:(i+1)*FRAMES_PER_SEC*SEC_PER_SEGMENT, :], axis=0)
                 segment_features[i, :] = features / (np.linalg.norm(features) + 1e-5)
                 
             # context features = average features for all frames in video
-            features = np.mean(video_features, axis=0)
+            features = POOLING[self.pooling](video_features, axis=0)
             context_features = features / (np.linalg.norm(features) + 1e-5)
             
             self.video_features[video] = dict(

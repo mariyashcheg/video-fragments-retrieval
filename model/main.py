@@ -1,6 +1,7 @@
 import argparse
 import numpy as np
 import random
+import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +10,7 @@ import torch.optim as optim
 import data
 import models
 import utils
+import evaluate_single
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -156,6 +158,7 @@ if __name__ == '__main__':
     parser.add_argument("--normalize_loss", type=utils.str2bool, default=False)
     parser.add_argument("--intra_same_length", type=utils.str2bool, default=True)
     parser.add_argument("--normalize_lang", type=utils.str2bool, default=False)
+    parser.add_argument("--pooling", type=str, default='avg')
     args = parser.parse_args()
 
     FT_DIRECTORY = args.features_dir
@@ -186,9 +189,12 @@ if __name__ == '__main__':
     print('Loading word embeddings:')
     word_indexer = data.WordIndexer(EMB_DIRECTORY)
     print('Loading train dataset:')
-    train_dataset = data.CustomDataset(train_videos, train_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
+    train_dataset = data.CustomDataset(
+        train_videos, train_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, pooling=args.pooling)
+        
     print('Loading test dataset:')
-    test_dataset = data.CustomDataset(test_videos, test_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE)
+    test_dataset = data.CustomDataset(
+        test_videos, test_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, pooling=args.pooling)
     
     train_iter = DataLoader(train_dataset, shuffle=False, collate_fn=data.custom_collate, 
         batch_sampler=data.CustomBatchSampler(
@@ -215,7 +221,7 @@ if __name__ == '__main__':
         normalize_lang=args.normalize_lang
     )
 
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.1)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.005)
     # optimizer = optim.SGD(model.parameters(), lr=0.05, momentum=0.95)
     scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
     
@@ -231,8 +237,8 @@ if __name__ == '__main__':
             model_state_dict=model.state_dict(),
             optimizer_state_dict=optimizer.state_dict(),
             loss=test_loss,
-            params={param: value for param, value in args.items() 
-                            if param in ['device','feature_type','normalize_loss','normalize_lang']},
+            params={param: value for param, value in vars(args).items() 
+                            if param in ['device','feature_type','normalize_loss','normalize_lang','pooling']},
             global_step=trainer.global_step,
         )
         torch.save(state, new_experiment.joinpath('last.pth'))
