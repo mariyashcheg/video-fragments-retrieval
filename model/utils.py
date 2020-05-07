@@ -40,12 +40,7 @@ def load_dataset_info(dataset_type, dataset_directory, missed_videos_path):
 
 def start_new_experiment(exper_dir):
     if Path(exper_dir).exists() and Path(exper_dir).is_dir():
-        experiments = []
-        for d in Path(exper_dir).iterdir():
-            n = re.fullmatch(r'\d+', d.name)
-            if d.is_dir() and n is not None:
-                experiments.append(int(n.group()))
-        experiments = sorted(experiments)        
+        experiments = get_existing_experiments(exper_dir)
         new_experiment = str(experiments[-1]+1)
     else:
         Path(exper_dir).mkdir(exist_ok=False)
@@ -53,6 +48,15 @@ def start_new_experiment(exper_dir):
     new_exper_dir = Path(exper_dir).joinpath(new_experiment)
     Path(new_exper_dir).mkdir(exist_ok=False)
     return new_exper_dir
+
+
+def get_existing_experiments(exper_dir):
+    experiments = []
+    for d in Path(exper_dir).iterdir():
+        n = re.fullmatch(r'\d+', d.name)
+        if d.is_dir() and n is not None:
+            experiments.append(int(n.group()))
+    return sorted(experiments)
 
 
 def str2bool(param):
@@ -76,3 +80,13 @@ def get_iou(times, start_t, end_t):
     intersection = np.maximum(np.minimum(times[:, 1], end_t) + 1 - np.maximum(times[:, 0], start_t), 0)
     union = np.maximum(times[:, 1], end_t) + 1 - np.minimum(times[:, 0], start_t)
     return intersection / union
+
+
+def grad_norm(model):
+    grad = 0.0
+    count = 0
+    for name, tensor in model.named_parameters():
+        if tensor.grad is not None:
+            grad += tensor.grad.data.norm().cpu().item()
+            count += 1
+    return grad / count

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import itertools
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 from utils import generate_moments, get_iou
 
@@ -254,7 +254,9 @@ class CustomBatchSampler(BatchSampler):
             if self.train:
                 start_t, end_t = random.choice(self.get_annotations(annot_id)) 
             else:
-                start_t, end_t = self.get_annotations(annot_id)[0]
+                annots = self.get_annotations(annot_id)
+                start_t, end_t = Counter(
+                    [tuple(annots[i,:]) for i in range(annots.shape[0])]).most_common()[0][0]
             
             # intra-negative sample (wrong segments from the same video):
             #    select segment of the same length (???) in the video which IoU with posit is less then 1
