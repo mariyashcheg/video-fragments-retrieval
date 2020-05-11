@@ -5,11 +5,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import itertools
-from collections import defaultdict, Counter
+import h5py
 
 from utils import generate_moments, get_iou
 
 from tqdm import tqdm
+from collections import defaultdict, Counter
 from pathlib import Path
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader
@@ -119,14 +120,18 @@ class WordIndexer():
 
 class CustomDataset(Dataset):
 
-    def __init__(self, videos, annotations, word_indexer, ft_directory, ft_type, validate=False, max_query_len=50, pooling='avg'):
+    def __init__(self, videos, annotations, ft_directory, ft_type, word_indexer=None, bert_tokenizer=None, 
+            bert_model=None, validate=False, max_query_len=20, pooling='avg', prep=False):
         self.word_indexer = word_indexer
+        self.bert_tokenizer = bert_tokenizer
+        self.bert_model = bert_model
         self.max_query_len = max_query_len
         self.ft_directory = ft_directory
         self.ft_type = ft_type
         self.num_segments_info = {}
         self.validate = validate
         self.pooling = pooling
+        self.preprocessed = prep
         # unique video
         self.video_features = {}
         self.load_video_features(videos)
@@ -136,24 +141,44 @@ class CustomDataset(Dataset):
 
     def load_video_features(self, videos):
         for video in tqdm(videos):
-            ft_file = f'features_{self.ft_type}/{self.ft_type}_ft_{video}.npy'
-            video_features = np.load(Path(self.ft_directory).joinpath(ft_file))
-            video_features = video_features.reshape((video_features.shape[0], FEATURE_DIM[self.ft_type]))
-            if video_features.shape[0] % SELECT_FPS == 0:
-                num_segments = video_features.shape[0] // SELECT_FPS
-            else:
-                num_segments = video_features.shape[0] // SELECT_FPS + 1
+            if self.preprocessed:
+                ft_file = f'fc7_subsample5_fps25_{video}.h5'
+                h5_file = h5py.File(Path(self.ft_directory).joinpath(ft_file))
+                video_features = np.array(h5_file['features'])
+                h5_file.close()
 
-            # segment features = average features for all frames in segment
-            segment_features = np.zeros((num_segments, FEATURE_DIM[self.ft_type]))
-            for i in range(segment_features.shape[0]):
-                features = POOLING[self.pooling](
-                    video_features[i*FRAMES_PER_SEC*SEC_PER_SEGMENT:(i+1)*FRAMES_PER_SEC*SEC_PER_SEGMENT, :], axis=0)
-                segment_features[i, :] = features / (np.linalg.norm(features) + 1e-5)
-                
-            # context features = average features for all frames in video
-            features = POOLING[self.pooling](video_features, axis=0)
-            context_features = features / (np.linalg.norm(features) + 1e-5)
+                segment_features = np.zeros((int(30/SEC_PER_SEGMENT), video_features.shape[1]))
+                count = 0
+                for i in range(0, min(video_features.shape[0], FRAMES_PER_SEC*SEC_PER_SEGMENT*6), FRAMES_PER_SEC*SEC_PER_SEGMENT):
+                    segment_features[count, :] = np.mean(video_features[i:i+FRAMES_PER_SEC*SEC_PER_SEGMENT, :], axis=0)
+                    count += 1
+                if np.sum(segment_features[5,:]) == 0:
+                    segment_features = segment_features[:5, :]
+                features = np.mean(segment_features, axis=0)
+                context_features = features / (np.linalg.norm(features) + 1e-5)
+                for i in range(segment_features.shape[0]):
+                    segment_features[i,:] = segment_features[i,:] / (np.linalg.norm(segment_features[i, :]) + 1e-5)
+                num_segments = segment_features.shape[0]
+
+            else:
+                ft_file = f'features_{self.ft_type}/{self.ft_type}_ft_{video}.npy'
+                video_features = np.load(Path(self.ft_directory).joinpath(ft_file))
+                video_features = video_features.reshape((video_features.shape[0], FEATURE_DIM[self.ft_type]))
+                if video_features.shape[0] % SELECT_FPS == 0:
+                    num_segments = video_features.shape[0] // SELECT_FPS
+                else:
+                    num_segments = video_features.shape[0] // SELECT_FPS + 1
+
+                # segment features = average features for all frames in segment
+                segment_features = np.zeros((num_segments, FEATURE_DIM[self.ft_type]))
+                for i in range(segment_features.shape[0]):
+                    features = POOLING[self.pooling](
+                        video_features[i*FRAMES_PER_SEC*SEC_PER_SEGMENT:(i+1)*FRAMES_PER_SEC*SEC_PER_SEGMENT, :], axis=0)
+                    segment_features[i, :] = features / (np.linalg.norm(features) + 1e-5)
+                    
+                # context features = average features for all frames in video
+                features = POOLING[self.pooling](video_features, axis=0)
+                context_features = features / (np.linalg.norm(features) + 1e-5)
             
             self.video_features[video] = dict(
                 segment_features=segment_features,
@@ -165,9 +190,16 @@ class CustomDataset(Dataset):
     def load_lang_features(self, annotations):        
         for annot_id, annot_info in tqdm(annotations.items()):
             query = annot_info['description'].rstrip('\n ').lower()
-            words = re.sub(f'(?=[^\s])(?=[{string.punctuation}])', ' ', query).split(' ')
-            self.lang_features[annot_id] = self.word_indexer.items2tensor(
-                [words], self.max_query_len) 
+            words = [i[1] for i in re.findall("('\w )|([\w\d]+)", query) if i[1] != '']
+            # words = re.sub(f'(?=[^\s])(?=[{string.punctuation}])', ' ', query).split(' ')
+            if self.word_indexer is not None:
+                self.lang_features[annot_id] = self.word_indexer.items2tensor(
+                    [words], self.max_query_len)
+            elif self.bert_tokenizer is not None:
+                with torch.no_grad():
+                    tokens = self.bert_tokenizer.encode_plus(
+                        ' '.join(words), return_tensors="pt") #, max_length=self.max_query_len)
+                    self.lang_features[annot_id] = self.bert_model(**tokens)[1]
             
     def make_visual_features(self, video, start_t, end_t):
         num_segments = self.video_features[video]['num_segments']

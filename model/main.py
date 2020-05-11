@@ -19,6 +19,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 from collections import defaultdict
+from transformers import BertTokenizer, BertModel
 
 plt.switch_backend('agg')
 
@@ -26,7 +27,7 @@ plt.switch_backend('agg')
 class Trainer:
 
     def __init__(self, train_writer=None, test_writer=None, val_writer=None, normalize_loss=False, 
-        compute_grads=True, device=None, b=0.1, lamb=0.4):
+        compute_grads=True, device=None, bert=False, b=0.1, lamb=0.4):
 
         self.device = device
         self.train_writer = train_writer
@@ -36,6 +37,7 @@ class Trainer:
         self.global_step = 0
         self.b = b
         self.lamb = lamb
+        self.bert = bert
         self.normalize_loss = normalize_loss
 
     def train_epoch(self, model, iterator, optimizer):
@@ -56,7 +58,7 @@ class Trainer:
             posit_emb = model(posit_ft)
             intra_emb = model(intra_ft)
             inter_emb = model(inter_ft)
-            lang_emb = model(lang_ft, False, self.device)
+            lang_emb = model(lang_ft, False, self.device, self.bert)
             
             loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, maskp, maskn)        
             epoch_loss += loss.item()
@@ -96,7 +98,7 @@ class Trainer:
                 posit_emb = model(posit_ft)
                 intra_emb = model(intra_ft)
                 inter_emb = model(inter_ft)
-                lang_emb = model(lang_ft, False, self.device)
+                lang_emb = model(lang_ft, False, self.device, self.bert)
                 
                 loss, n_samples = self.ranking_loss(posit_emb, intra_emb, inter_emb, lang_emb, maskp, maskn)
                 epoch_loss += loss.item()
@@ -120,6 +122,7 @@ class Trainer:
         size=250, iou_thresholds=[0.5, 0.7], atk=[1,10,100]):
         
         videos = {}
+        model.eval()
         # compute embeddings for all clips in each unique video in dataset
         for batch in video_iterator:
             with torch.no_grad():
@@ -136,7 +139,7 @@ class Trainer:
         # compute embeddings for all queries in dataset
         for li, batch in tqdm(enumerate(lang_iterator)):
             with torch.no_grad():
-                lang_emb = model(batch['feature'].to(self.device), False, self.device)
+                lang_emb = model(batch['feature'].to(self.device), False, self.device, self.bert)
 
             # ground truth: 1 if IoU between moment and at least 2 manual annotations is greater the threshold
             # for incorrect videos all IoU scores are 0
@@ -248,6 +251,8 @@ if __name__ == '__main__':
     parser.add_argument("--normalize_loss", type=utils.str2bool, default=False)
     parser.add_argument("--intra_same_length", type=utils.str2bool, default=True)
     parser.add_argument("--normalize_lang", type=utils.str2bool, default=False)
+    parser.add_argument("--preprocessed_ft", type=utils.str2bool, default=False)
+    parser.add_argument("--bert_embeddings", type=utils.str2bool, default=False)
     parser.add_argument("--pooling", type=str, default='avg')
     parser.add_argument("--val_size", type=int, default=250)
     args = parser.parse_args()
@@ -278,15 +283,33 @@ if __name__ == '__main__':
     test_annotations, test_videos = utils.load_dataset_info('test', DATASET_DIRECTORY, MISSED_VIDEOS)
 
     print('Loading word embeddings:')
-    word_indexer = data.WordIndexer(EMB_DIRECTORY)
+    if args.bert_embeddings:
+        bert_model = BertModel.from_pretrained('bert-base-uncased')
+        bert_model.eval()
+        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    else:
+        word_indexer = data.WordIndexer(EMB_DIRECTORY)
+    
     print('Loading train dataset:')
-    train_dataset = data.CustomDataset(
-        train_videos, train_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, pooling=args.pooling)
+    if args.bert_embeddings:
+        train_dataset = data.CustomDataset(
+            train_videos, train_annotations, FT_DIRECTORY, FEATURE_TYPE, bert_tokenizer=bert_tokenizer, 
+            bert_model=bert_model, pooling=args.pooling, prep=args.preprocessed_ft)
+    else:
+        train_dataset = data.CustomDataset(
+            train_videos, train_annotations, FT_DIRECTORY, FEATURE_TYPE, word_indexer=word_indexer, 
+            pooling=args.pooling, prep=args.preprocessed_ft)
 
     print('Loading test dataset:')
-    test_dataset = data.CustomDataset(
-        test_videos, test_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, pooling=args.pooling)
-    
+    if args.bert_embeddings:
+        test_dataset = data.CustomDataset(
+            test_videos, test_annotations, FT_DIRECTORY, FEATURE_TYPE, bert_tokenizer=bert_tokenizer, 
+            bert_model=bert_model, pooling=args.pooling, prep=args.preprocessed_ft)
+    else:
+        test_dataset = data.CustomDataset(
+            test_videos, test_annotations, FT_DIRECTORY, FEATURE_TYPE, word_indexer=word_indexer,
+            pooling=args.pooling, prep=args.preprocessed_ft)
+        
     train_iter = DataLoader(train_dataset, shuffle=False, collate_fn=data.custom_collate, 
         batch_sampler=data.CustomBatchSampler(
             BATCH_SIZE, train_annotations, train_dataset.num_segments_info, same_length=args.intra_same_length))    
@@ -295,7 +318,12 @@ if __name__ == '__main__':
             BATCH_SIZE, test_annotations, test_dataset.num_segments_info, train=False, same_length=args.intra_same_length))
     
     print('Loading val dataset:')
-    val_dataset = data.CustomDataset(test_videos, test_annotations, word_indexer, FT_DIRECTORY, FEATURE_TYPE, validate=True)
+    if args.bert_embeddings:
+        val_dataset = data.CustomDataset(test_videos, test_annotations, FT_DIRECTORY, FEATURE_TYPE, 
+            bert_tokenizer=bert_tokenizer, bert_model=bert_model, validate=True, prep=args.preprocessed_ft)
+    else:
+        val_dataset = data.CustomDataset(test_videos, test_annotations, FT_DIRECTORY, FEATURE_TYPE, 
+            word_indexer=word_indexer, validate=True, prep=args.preprocessed_ft)
     val_video_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
         batch_sampler=data.VideoBatchSampler(test_videos, val_dataset.num_segments_info))
     val_lang_iter = DataLoader(val_dataset, shuffle=False, collate_fn=data.validate_collate, 
@@ -310,15 +338,22 @@ if __name__ == '__main__':
         normalize_loss=args.normalize_loss,
         compute_grads=True, 
         device=DEVICE, 
+        bert=args.bert_embeddings,
         b=0.1, lamb=0.4
     )
 
-    model = models.CALModel(
-        pretrained_emb=word_indexer.get_embeddings(),
-        visual_input_dim=data.FEATURE_DIM[FEATURE_TYPE]*2+2,
-        emb_dim=data.EMBEDDING_DIM, 
-        normalize_lang=args.normalize_lang
-    )
+    if args.bert_embeddings:
+        model = models.CALModel(
+            visual_input_dim=data.FEATURE_DIM[FEATURE_TYPE]*2+2,
+            emb_dim=data.EMBEDDING_DIM, 
+        )
+    else:
+        model = models.CALModel(
+            pretrained_emb=word_indexer.get_embeddings(),
+            visual_input_dim=data.FEATURE_DIM[FEATURE_TYPE]*2+2,
+            emb_dim=data.EMBEDDING_DIM, 
+            normalize_lang=args.normalize_lang
+        )
 
     optimizer = optim.Adam(model.parameters(), lr=5e-4, weight_decay=5e-3)
     # optimizer = optim.SGD(model.parameters(), lr=0.05, momentum=0.95)
