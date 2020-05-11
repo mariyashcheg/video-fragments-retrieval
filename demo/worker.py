@@ -60,7 +60,7 @@ class Worker:
         for video, fragments in top5.items():
             ret.append(
                 dict(
-                    video=video,
+                    video="/videos/" + video,  # just a mapping from local to url
                     fragments=fragments,
                 )
             )

@@ -31,6 +31,7 @@ async def init_app(loop, args):
     app.router.add_get("/", index)
     app.router.add_post("/handle", handle)
     app.router.add_static("/static", path="./static", name="static")
+    app.router.add_static("/videos", path=args.videos, name="videos")
 
     app.worker = Worker(args.index, args.textual, args.glove)
     return app
@@ -67,6 +68,12 @@ def _parse_args():
         type=str,
         default='../glove_pretrained',
         help="Path to folder with glove"
+    )
+    p.add_argument(
+        "--videos",
+        type=str,
+        default="../videos",
+        help="Path to local video library",
     )
     return p.parse_args()
 

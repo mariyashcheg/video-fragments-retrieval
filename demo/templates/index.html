@@ -4,6 +4,10 @@ Video fragment retrieval
 {% endblock %}
 
 {% block content %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.7.6/handlebars.min.js" integrity="sha256-usTqAE1ywvdMtksWzdeWzD75MsfJN0h0U7y2NtZL3N0=" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="http://maxcdn.bootstrapcdn.com/font-awesome/latest/css/font-awesome.min.css">
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
 
 <section class="center">
     <div class="col-6">
@@ -36,17 +40,42 @@ Video fragment retrieval
 </section>
 
 
+{% raw %}
+<script id="entry-template" type="text/x-handlebars-template">
+    {{#each entries}}
+    <li>
+        <video id="vid_{{@index}}" controls preload="metadata">
+            <source src="{{video}}" type="video/mp4">
+        </video>
+        <p>Here will be plotly with confidence response</p>
+        {{#each fragments}}
+            <button class="btn" onclick="jumpTo({{@../index}}, {{this}})"> {{@index}}</button>
+        {{/each}}
+    </li>
+    {{/each}}
+</script>
+{% endraw %}
+
+
 <script>
+function jumpTo(videoId, ts) {
+    const video = document.getElementById("vid_" + videoId);
+    video.currentTime = ts;
+    video.play();
+}
+
 function sendQuery () {
+    const source = document.getElementById("entry-template").innerHTML;
+    console.log(source);
+    const template = Handlebars.compile(source);
+
     const query = document.getElementById("query").value;
     let xhr = new XMLHttpRequest();
 
     xhr.onload = function () {
         const response = JSON.parse(xhr.response);
-        for (let entry of response) {
-            console.log(entry);
-            retrieved.textContent += entry['video'];
-        }
+        const html = template({entries: response});
+        document.getElementById('retrieved').innerHTML = html;
     }
 
     xhr.open("POST", "/handle");
