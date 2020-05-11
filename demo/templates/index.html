@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}
+Video fragment retrieval
+{% endblock %}
+
+{% block content %}
+
+<section class="center">
+    <div class="col-6">
+        <h2 class="title">Vid Retriever</h2>
+
+        <form action="">
+            <div class="form-group">
+                <label for="query">
+                    <input type="text"
+                           id="query"
+                           name="query"
+                           class="form-control"
+                           autocomplete="off"
+                           placeholder="Type query here"
+                           required
+                           autofocus
+                           size="180"
+                    >
+                </label>
+                <input type="submit" hidden>
+            </div>
+        </form>
+        <br/>
+
+        <div id="retrieved">
+        </div>
+
+    </div>
+
+</section>
+
+
+<script>
+function sendQuery () {
+    const query = document.getElementById("query").value;
+    let xhr = new XMLHttpRequest();
+
+    xhr.onload = function () {
+        const response = JSON.parse(xhr.response);
+        for (let entry of response) {
+            console.log(entry);
+            retrieved.textContent += entry['video'];
+        }
+    }
+
+    xhr.open("POST", "/handle");
+    const data = JSON.stringify({query: query});
+    xhr.send(data);
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  document.forms[0].onsubmit = function (event) {
+    event.preventDefault();
+    sendQuery();
+  };
+});
+</script>
+
+{% endblock %}
