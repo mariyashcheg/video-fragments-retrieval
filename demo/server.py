@@ -32,7 +32,7 @@ async def init_app(loop, args):
     app.router.add_post("/handle", handle)
     app.router.add_static("/static", path="./static", name="static")
 
-    app.worker = Worker(args.textual, args.index)
+    app.worker = Worker(args.index, args.textual, args.glove)
     return app
 
 
@@ -61,6 +61,12 @@ def _parse_args():
         type=str,
         default='./index-test.pkl',
         help="Path to video-index"
+    )
+    p.add_argument(
+        "--glove",
+        type=str,
+        default='../glove_pretrained',
+        help="Path to folder with glove"
     )
     return p.parse_args()
 
