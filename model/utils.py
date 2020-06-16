@@ -72,6 +72,7 @@ def generate_moments(num_segments):
     moments = [(j,j) for j in range(num_segments)]
     for j in itertools.combinations(range(num_segments), 2):
         moments.append(j)
+    # moments = [(i,j) for (i,j) in moments if j - i + 1 >= 2]
     return moments
 
 
